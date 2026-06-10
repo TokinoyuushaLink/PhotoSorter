@@ -6,6 +6,8 @@ extension Notification.Name {
     static let refreshRequested            = Notification.Name("PhotoSorterRefresh")
     static let refocusCapture              = Notification.Name("PhotoSorterRefocusCapture")
     static let autoHideStripToggled        = Notification.Name("PhotoSorterAutoHideStripToggled")
+    static let videoLoopToggled            = Notification.Name("PhotoSorterVideoLoopToggled")
+    static let thumbnailFitToggled         = Notification.Name("PhotoSorterThumbnailFitToggled")
     static let appShouldTerminateWithConfirm = Notification.Name("PhotoSorterTerminateConfirm")
     static let sortedSelectionShouldClear    = Notification.Name("PhotoSorterClearSortedSelection")
     static let confirmDeletePending          = Notification.Name("PhotoSorterConfirmDeletePending")
@@ -14,9 +16,23 @@ extension Notification.Name {
 }
 
 enum Prefs {
-    static let autoHideStrip  = "ps.autoHideStripInSingleMode"
-    static let sidebarVisible = "ps.sidebarVisible"
+    static let autoHideStrip     = "ps.autoHideStripInSingleMode"
+    static let sidebarVisible    = "ps.sidebarVisible"
     static let hasPendingDeletes = "ps.hasPendingDeletes"
+    static let videoLoop         = "ps.videoLoop"
+    static let thumbnailFit      = "ps.thumbnailFit"
+    static let photoLibraryPath  = "ps.photoLibraryPath"
+}
+
+enum PhotoLibrary {
+    static var derivativesBase: String? {
+        UserDefaults.standard.string(forKey: Prefs.photoLibraryPath)
+            .map { "\($0)/resources/derivatives" }
+    }
+    static var mastersBase: String? {
+        UserDefaults.standard.string(forKey: Prefs.photoLibraryPath)
+            .map { "\($0)/resources/derivatives/masters" }
+    }
 }
 
 // PHImageManager on macOS returns NSImage backed by NSCGImageSnapshotRep whose CGImage
@@ -58,6 +74,8 @@ func withoutAnimation(_ body: () -> Void) {
     var originX: CGFloat = 0
     var originY: CGFloat = 0
     var scrollOffset: CGFloat = 0
+    // Set by PhotoCollectionView coordinator; call to instantly scroll a flat index into view
+    var scrollToVisible: ((Int) -> Void)?
 
     func frameFor(index: Int) -> CGRect {
         guard cellSize > 0, cols > 0 else { return .zero }
@@ -127,6 +145,9 @@ enum Layout {
     // Window
     static let windowInitialSize                = CGSize(width: 1100, height: 720)
     static let windowMinSize                    = CGSize(width: 800, height: 560)
+    static let titlebarAreaHeight: CGFloat      = 38    // titlebar row height used by overlay frames
+    static let videoTriggerHeight: CGFloat      = 56    // video controls hover zone height
+    static let sortedSectionHeaderHeight: CGFloat = 48  // non-first section header height in sorted view
 
     // Album strip chips
     static let chipHeight: CGFloat              = 26
@@ -155,4 +176,53 @@ enum Anim {
     static let mediaReadyDelayMs: UInt64       = 630   // spring(response:0.42) settles ~650ms
     static let dismissDelay:      TimeInterval = 0.35
     static let gestureThreshold:  CGFloat      = 0.05
+
+    // UI feedback
+    static let hintDuration:       TimeInterval = 2.5   // top hint auto-dismiss
+    static let fadeInOut:          TimeInterval = 0.2   // generic crossfade
+    static let fastFade:           TimeInterval = 0.15  // title gradient threshold crossfade
+    static let multiHintFade:      TimeInterval = 0.4   // multi-queue hint fade
+
+    // Collection animations
+    static let batchUpdateDuration: TimeInterval = 0.28  // NSCollectionView batch delete/insert
+    static let dragSettleDuration:  TimeInterval = 0.2   // strip drag reorder cell slide
+    static let dragCommitDuration:  TimeInterval = 0.15  // strip drag commit snap-back
+
+    // Column browser highlight
+    static let columnHighlightDelay:  TimeInterval = 0.13  // show highlight after assign
+    static let columnClearDelay:      TimeInterval = 0.11  // clear highlight after show
+}
+
+// MARK: - Stable NSTrackingArea wrapper
+
+struct TrackingAreaView: NSViewRepresentable {
+    var onHover: (Bool) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = TrackingNSView()
+        v.onHover = onHover
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? TrackingNSView)?.onHover = onHover
+    }
+
+    private class TrackingNSView: NSView {
+        var onHover: ((Bool) -> Void)?
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach { removeTrackingArea($0) }
+            addTrackingArea(NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            ))
+        }
+
+        override func mouseEntered(with event: NSEvent) { onHover?(true) }
+        override func mouseExited(with event: NSEvent)  { onHover?(false) }
+    }
 }

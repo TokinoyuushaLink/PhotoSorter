@@ -86,6 +86,13 @@ final class SortHistory {
         UserDefaults.standard.set(false, forKey: Prefs.hasPendingDeletes)
     }
 
+    func clearAll() {
+        undoStack = []
+        redoStack = []
+        pendingDeleteAssets = []
+        UserDefaults.standard.set(false, forKey: Prefs.hasPendingDeletes)
+    }
+
     func removeFromPendingDelete(ids: Set<String>) {
         pendingDeleteAssets.removeAll { ids.contains($0.id) }
         UserDefaults.standard.set(!pendingDeleteAssets.isEmpty, forKey: Prefs.hasPendingDeletes)

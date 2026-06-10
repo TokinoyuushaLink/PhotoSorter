@@ -13,6 +13,7 @@ struct ContentView: View {
 
     @State private var showQuitConfirm = false        // quit-time alert (has pending deletes)
     @State private var showQuitUncategorized = false  // quit-time alert (no pending deletes)
+    @State private var showRefreshConfirm = false     // refresh alert while in sorted view
     @State private var rightWidth: CGFloat = Layout.columnWidth + 1
     @State private var sidebarVisible: Bool = UserDefaults.standard.object(forKey: Prefs.sidebarVisible) == nil
         ? true
@@ -24,6 +25,10 @@ struct ContentView: View {
     @State private var showingPreview = false      // drives gradient timing, decoupled from isInSingleMode
     @State private var singleModeInitialIndex: Int = 0
     @State private var singleModeCurrentIndex: Int = 0
+    // Pending onDismiss work; cancelled if enter interrupts the dismiss animation
+    @State private var pendingDismissWork: DispatchWorkItem?
+    // Incremented each time we (re-)enter single mode; SinglePhotoView re-runs entry animation
+    @State private var singleEnterTrigger: Int = 0
     // Snapshot of the queue shown in SinglePhotoView (全部 or 多选子集)
     @State private var singleModeAssets: [PhotoAsset] = []
     // Briefly show top overlay with hint text when entering multi-select queue
@@ -48,6 +53,7 @@ struct ContentView: View {
     @State private var autoHideStrip: Bool = UserDefaults.standard.object(forKey: Prefs.autoHideStrip) == nil
         ? true
         : UserDefaults.standard.bool(forKey: Prefs.autoHideStrip)
+    @State private var thumbnailFit: Bool = UserDefaults.standard.bool(forKey: Prefs.thumbnailFit)
 
     init() {
         _photosStore = State(initialValue: PhotosStore())
@@ -74,10 +80,14 @@ struct ContentView: View {
         colorScheme == .dark || bottomGradientOpacity > 0.5
     }
 
-    // 大标题：0→0.5 段淡出
-    private var largeTitleOpacity: Double { max(0, 1 - Double(topGradientOpacity) * 2) }
-    // 小标题和顶部渐变：0.5→1 段淡入
-    private var smallTitleOpacity: Double { max(0, Double(topGradientOpacity) * 2 - 1) }
+    // 大标题：随顶部渐变 0→0.5 段淡出；multiQueueHint 时强制隐藏（提示走小标题行）
+    private var largeTitleOpacity: Double {
+        multiQueueHint ? 0 : max(0, 1 - Double(topGradientOpacity) * 2)
+    }
+    // 小标题和顶部渐变：multiQueueHint 时强制显示；否则随顶部渐变 0.5→1 段淡入
+    private var smallTitleOpacity: Double {
+        multiQueueHint ? 1 : max(0, Double(topGradientOpacity) * 2 - 1)
+    }
 
     // 面板总宽度 = 分割线(1pt) + 列浏览器；隐藏时为 0，各层 padding 自动收回
     private var panelTotalWidth: CGFloat { sidebarVisible ? 1 + rightWidth : 0 }
@@ -95,6 +105,7 @@ struct ContentView: View {
                 bottomGradientOpacity: $bottomGradientOpacity,
                 topPadding: ((!photosStore.assets.isEmpty || totalSortedAndDeleteCount > 0) && !photosStore.isLoading) ? topGradientH : 0,
                 bottomPadding: stripH + stripFadeH,
+                useThumbnailFit: thumbnailFit,
                 sections: showSortedView ? sortedSections : nil,
                 externalSelectedIDs: showSortedView ? $sortedSelectedIDs : nil,
                 onSelectAll: showSortedView ? {
@@ -112,54 +123,8 @@ struct ContentView: View {
                 .allowsHitTesting(false)
 
             // 层 3：单图预览（宽度限制到面板左边，照片动画在网格侧内运动）
-            if isInSingleMode {
-                SinglePhotoView(
-                    assets: singleModeAssets,
-                    initialIndex: singleModeInitialIndex,
-                    sourceFrame: $focusedFrame,
-                    getGridFrame: { localIdx in
-                        let id = localIdx < singleModeAssets.count ? singleModeAssets[localIdx].id : nil
-                        guard let eid = id else {
-                            return gridFrameProvider?(localIdx) ?? gridLayout.frameFor(index: localIdx)
-                        }
-                        // Compute flat index across the active section layout
-                        let flatIdx: Int?
-                        if showSortedView {
-                            let secs = sortedSections
-                            var off = 0
-                            var found: Int? = nil
-                            for sec in secs {
-                                if let i = sec.assets.firstIndex(where: { $0.id == eid }) {
-                                    found = off + i; break
-                                }
-                                off += sec.assets.count
-                            }
-                            flatIdx = found
-                        } else {
-                            flatIdx = photosStore.assets.firstIndex(where: { $0.id == eid })
-                        }
-                        let idx = flatIdx ?? localIdx
-                        return gridFrameProvider?(idx) ?? gridLayout.frameFor(index: idx)
-                    },
-                    onIndexChange: { singleModeCurrentIndex = $0 },
-                    onDismissBegin: { showingPreview = false },
-                    onDismiss: { finalIndex in
-                        isInSingleMode = false
-                        let dismissedID = singleModeAssets.indices.contains(finalIndex)
-                            ? singleModeAssets[finalIndex].id : nil
-                        if let id = dismissedID { focusedID = id }
-                    },
-                    onShortcut: { idx in
-                        let nodes = albumsStore.favoriteNodes
-                        guard nodes.indices.contains(idx) else { return }
-                        assignToAlbum(nodes[idx])
-                    },
-                    panelWidth: panelTotalWidth,
-                    swipeExcludeBottom: stripH,
-                    swipeExcludeRight: panelTotalWidth
-                )
-                .transition(.identity)
-            }
+            if isInSingleMode { singlePhotoView.transition(.identity) }
+
 
             // 层 4：渐变 + 标题文字（在 SinglePhotoView 上方，进入单图时淡出）
             if (!photosStore.assets.isEmpty || totalSortedAndDeleteCount > 0) && !photosStore.isLoading {
@@ -171,19 +136,19 @@ struct ContentView: View {
                 .allowsHitTesting(false)
                 .opacity(showingPreview && !multiQueueHint ? 0 : 1)
                 .animation(Anim.enter, value: showingPreview)
-                .animation(.easeInOut(duration: 0.4), value: multiQueueHint)
+                .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
 
                 smallTitleOverlay
                     .padding(.trailing, panelTotalWidth)
                     .opacity(showingPreview && !multiQueueHint ? 0 : 1)
                     .animation(Anim.enter, value: showingPreview)
-                    .animation(.easeInOut(duration: 0.4), value: multiQueueHint)
+                    .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
 
                 largeTitleOverlay
                     .padding(.trailing, panelTotalWidth)
                     .opacity(showingPreview && !multiQueueHint ? 0 : 1)
                     .animation(Anim.enter, value: showingPreview)
-                    .animation(.easeInOut(duration: 0.4), value: multiQueueHint)
+                    .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
 
                 VStack(spacing: 0) {
                     Spacer()
@@ -235,7 +200,7 @@ struct ContentView: View {
             // MovableTitleBarBackground 垫底保证未命中按钮的点击仍可拖动窗口
             VStack(spacing: 0) {
                 MovableTitleBarBackground()
-                    .frame(height: 38)
+                    .frame(height: Layout.titlebarAreaHeight)
                     .overlay(alignment: .trailing) {
                         Button(action: toggleSidebar) {
                             Image(systemName: "sidebar.right")
@@ -254,8 +219,8 @@ struct ContentView: View {
                         .help("显示/隐藏相册面板 (⌘\\)")
                         .padding(.trailing, sidebarVisible ? 1 + rightWidth + 2 : 4)
                         .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
-                        .animation(.easeInOut(duration: 0.2), value: showingPreview)
-                        .animation(.easeInOut(duration: 0.2), value: topLabelIsWhite)
+                        .animation(.easeInOut(duration: Anim.fadeInOut), value: showingPreview)
+                        .animation(.easeInOut(duration: Anim.fadeInOut), value: topLabelIsWhite)
                     }
 
                 if !showingPreview && totalSortedAndDeleteCount > 0 {
@@ -271,8 +236,8 @@ struct ContentView: View {
 
                 Spacer()
             }
-            .animation(.easeInOut(duration: 0.2), value: showingPreview)
-            .animation(.easeInOut(duration: 0.2), value: totalSortedAndDeleteCount > 0)
+            .animation(.easeInOut(duration: Anim.fadeInOut), value: showingPreview)
+            .animation(.easeInOut(duration: Anim.fadeInOut), value: totalSortedAndDeleteCount > 0)
 
             // 层 7：全局反馈层
             if needsPermission { permissionOverlay }
@@ -306,10 +271,10 @@ struct ContentView: View {
             if prefix(oldText) == prefix(newText) {
                 displayedStatusText = newText
             } else {
-                withAnimation(.easeInOut(duration: 0.2)) { statusTextOpacity = 0 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                withAnimation(.easeInOut(duration: Anim.fadeInOut)) { statusTextOpacity = 0 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + Anim.fadeInOut) {
                     displayedStatusText = newText
-                    withAnimation(.easeInOut(duration: 0.2)) { statusTextOpacity = 1 }
+                    withAnimation(.easeInOut(duration: Anim.fadeInOut)) { statusTextOpacity = 1 }
                 }
             }
         }
@@ -318,10 +283,10 @@ struct ContentView: View {
             if prefix(oldText) == prefix(newText) {
                 displayedLargeTitleText = newText
             } else {
-                withAnimation(.easeInOut(duration: 0.2)) { largeTitleTextOpacity = 0 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                withAnimation(.easeInOut(duration: Anim.fadeInOut)) { largeTitleTextOpacity = 0 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + Anim.fadeInOut) {
                     displayedLargeTitleText = newText
-                    withAnimation(.easeInOut(duration: 0.2)) { largeTitleTextOpacity = 1 }
+                    withAnimation(.easeInOut(duration: Anim.fadeInOut)) { largeTitleTextOpacity = 1 }
                 }
             }
         }
@@ -331,11 +296,18 @@ struct ContentView: View {
             albumsStore.reload()
         }
         .onReceive(NotificationCenter.default.publisher(for: .refreshRequested)) { _ in
-            photosStore.loadUncategorized()
-            albumsStore.reload()
+            if totalSortedAndDeleteCount > 0 {
+                showRefreshConfirm = true
+            } else {
+                photosStore.loadUncategorized()
+                albumsStore.reload()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .autoHideStripToggled)) { note in
             if let val = note.object as? Bool { autoHideStrip = val }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .thumbnailFitToggled)) { note in
+            if let val = note.object as? Bool { thumbnailFit = val }
         }
         // Quit alert: pending deletes exist → block and warn user to delete first
         .alert("还有待删除的照片", isPresented: $showQuitConfirm) {
@@ -362,6 +334,19 @@ struct ContentView: View {
                 Text("将把 \(sorted) 张照片写入相册。")
             }
         }
+        // Refresh alert: in sorted view with pending operations → confirm discard
+        .alert("确认刷新", isPresented: $showRefreshConfirm) {
+            Button("确定", role: .destructive) {
+                sortHistory.clearAll()
+                showSortedView = false
+                sortedSelectedIDs = []
+                photosStore.loadUncategorized()
+                albumsStore.reload()
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("刷新将清除所有已分类操作（共 \(totalSortedAndDeleteCount) 张），此操作不可撤销。")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .appShouldTerminateWithConfirm)) { _ in
             if sortHistory.hasPendingDeletes {
                 showQuitConfirm = true
@@ -379,14 +364,14 @@ struct ContentView: View {
             focusedID = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .sortedViewShouldDismiss)) { _ in
-            withAnimation(.easeInOut(duration: 0.2)) { showSortedView = false }
+            withAnimation(.easeInOut(duration: Anim.fadeInOut)) { showSortedView = false }
             sortedSelectedIDs = []
             focusedID = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .assetsDidSort)) { note in
             if let msg = note.object as? String { showTopHint(msg) }
             guard !showSortedView, photosStore.assets.isEmpty, totalSortedAndDeleteCount > 0 else { return }
-            withAnimation(.easeInOut(duration: 0.2)) { showSortedView = true }
+            withAnimation(.easeInOut(duration: Anim.fadeInOut)) { showSortedView = true }
             photosStore.clearSelection()
             focusedID = nil
         }
@@ -416,13 +401,14 @@ struct ContentView: View {
                         .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(Color.white.opacity(0.85))
                         .opacity(statusTextOpacity)
-                        .animation(.easeInOut(duration: 0.2), value: statusTextOpacity)
+                        .animation(.easeInOut(duration: Anim.fadeInOut), value: statusTextOpacity)
                 }
-                .opacity(topGradientOpacity > 0.5 ? 1 : 0)
-                .animation(.easeInOut(duration: 0.15), value: topGradientOpacity > 0.5)
+                .opacity(multiQueueHint || topGradientOpacity > 0.5 ? 1 : 0)
+                .animation(.easeInOut(duration: Anim.fastFade), value: topGradientOpacity > 0.5)
+                .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 38)
+            .frame(height: Layout.titlebarAreaHeight)
             .allowsHitTesting(false)
 
             Spacer().allowsHitTesting(false)
@@ -453,7 +439,7 @@ struct ContentView: View {
                     .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(Color(nsColor: .secondaryLabelColor))
                     .opacity(statusTextOpacity)
-                    .animation(.easeInOut(duration: 0.2), value: statusTextOpacity)
+                    .animation(.easeInOut(duration: Anim.fadeInOut), value: statusTextOpacity)
                     .transition(.opacity)
             }
         }
@@ -461,8 +447,12 @@ struct ContentView: View {
         .padding(.leading, 16)
         .padding(.top, titlebarHeight + 10)
         .opacity(largeTitleOpacity)
+        // showingPreview / multiQueueHint 触发时带动画淡出，独立于 topGradientOpacity 驱动的渐变逻辑
+        .opacity(showingPreview || multiQueueHint ? 0 : 1)
+        .animation(Anim.enter, value: showingPreview)
+        .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
         .allowsHitTesting(false)
-        .animation(.easeInOut(duration: 0.2), value: showSortedView)
+        .animation(.easeInOut(duration: Anim.fadeInOut), value: showSortedView)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { _ in updateTitlebarHeight() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in updateTitlebarHeight() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in updateTitlebarHeight() }
@@ -601,8 +591,90 @@ struct ContentView: View {
 
     // MARK: - Actions
 
+    @ViewBuilder private var singlePhotoView: some View {
+        SinglePhotoView(
+            assets: singleModeAssets,
+            initialIndex: singleModeInitialIndex,
+            enterTrigger: singleEnterTrigger,
+            sourceFrame: $focusedFrame,
+            getGridFrame: { localIdx in
+                let id = localIdx < singleModeAssets.count ? singleModeAssets[localIdx].id : nil
+                guard let eid = id else {
+                    return gridFrameProvider?(localIdx) ?? gridLayout.frameFor(index: localIdx)
+                }
+                let flatIdx: Int?
+                if showSortedView {
+                    let secs = sortedSections
+                    var off = 0
+                    var found: Int? = nil
+                    for sec in secs {
+                        if let i = sec.assets.firstIndex(where: { $0.id == eid }) {
+                            found = off + i; break
+                        }
+                        off += sec.assets.count
+                    }
+                    flatIdx = found
+                } else {
+                    flatIdx = photosStore.assets.firstIndex(where: { $0.id == eid })
+                }
+                return gridFrameProvider?(flatIdx ?? localIdx) ?? gridLayout.frameFor(index: flatIdx ?? localIdx)
+            },
+            onIndexChange: { singleModeCurrentIndex = $0 },
+            onDismissBegin: { showingPreview = false },
+            onBeforeDismiss: { localIdx in
+                let id = localIdx < singleModeAssets.count ? singleModeAssets[localIdx].id : nil
+                guard let eid = id else { return }
+                let flatIdx: Int?
+                if showSortedView {
+                    let secs = sortedSections
+                    var off = 0
+                    var found: Int? = nil
+                    for sec in secs {
+                        if let i = sec.assets.firstIndex(where: { $0.id == eid }) {
+                            found = off + i; break
+                        }
+                        off += sec.assets.count
+                    }
+                    flatIdx = found
+                } else {
+                    flatIdx = photosStore.assets.firstIndex(where: { $0.id == eid })
+                }
+                if let idx = flatIdx { gridLayout.scrollToVisible?(idx) }
+            },
+            onDismiss: { finalIndex in
+                let work = DispatchWorkItem {
+                    isInSingleMode = false
+                    let dismissedID = singleModeAssets.indices.contains(finalIndex)
+                        ? singleModeAssets[finalIndex].id : nil
+                    if let id = dismissedID { focusedID = id }
+                }
+                pendingDismissWork = work
+                DispatchQueue.main.async(execute: work)
+            },
+            onShortcut: { idx in
+                let nodes = albumsStore.favoriteNodes
+                guard nodes.indices.contains(idx) else { return }
+                assignToAlbum(nodes[idx])
+            },
+            panelWidth: panelTotalWidth,
+            swipeExcludeBottom: stripH,
+            swipeExcludeRight: panelTotalWidth,
+            useThumbnailFit: thumbnailFit
+        )
+        .transition(.identity)
+    }
+
     private func enterSingleMode() {
-        guard !isInSingleMode, let id = focusedID else { return }
+        // Dismiss animation in flight: cancel the pending isInSingleMode=false callback
+        // and re-trigger the entry animation on the existing SinglePhotoView.
+        if isInSingleMode {
+            pendingDismissWork?.cancel()
+            pendingDismissWork = nil
+            showingPreview = true
+            singleEnterTrigger += 1
+            return
+        }
+        guard let id = focusedID else { return }
 
         if showSortedView {
             // 已分类模式：多选 → 选中集队列；单选/无选 → 所在分组（含待删除组）作为队列
@@ -616,8 +688,8 @@ struct ContentView: View {
                 singleModeInitialIndex = startIdx
                 singleModeCurrentIndex = startIdx
                 multiQueueHint = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                    withAnimation(.easeInOut(duration: 0.4)) { multiQueueHint = false }
+                DispatchQueue.main.asyncAfter(deadline: .now() + Anim.hintDuration) {
+                    withAnimation(.easeInOut(duration: Anim.multiHintFade)) { multiQueueHint = false }
                 }
             } else {
                 // 找 id 所在的分组作为队列
@@ -639,8 +711,8 @@ struct ContentView: View {
                 singleModeInitialIndex = startIdx
                 singleModeCurrentIndex = startIdx
                 multiQueueHint = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                    withAnimation(.easeInOut(duration: 0.4)) { multiQueueHint = false }
+                DispatchQueue.main.asyncAfter(deadline: .now() + Anim.hintDuration) {
+                    withAnimation(.easeInOut(duration: Anim.multiHintFade)) { multiQueueHint = false }
                 }
             } else {
                 // 无选中（或仅单选）：队列 = 全部照片
@@ -653,6 +725,7 @@ struct ContentView: View {
 
         showingPreview = true
         isInSingleMode = true
+        singleEnterTrigger += 1
     }
 
     private func toggleSidebar() {
@@ -662,7 +735,8 @@ struct ContentView: View {
         UserDefaults.standard.set(sidebarVisible, forKey: Prefs.sidebarVisible)
     }
 
-    private func showTopHint(_ text: String, duration: Double = 2.5) {
+
+    private func showTopHint(_ text: String, duration: Double = Anim.hintDuration) {
         topHintTask?.cancel()
         topHintText = text
         topHintTask = Task { @MainActor in
@@ -820,12 +894,6 @@ struct ContentView: View {
 
     private func assignIDsForSorted() -> [String] {
         if !sortedSelectedIDs.isEmpty { return Array(sortedSelectedIDs) }
-        if let id = focusedID { return [id] }
-        return []
-    }
-
-    private func assignIDsForUncategorized() -> [String] {
-        if !photosStore.selectedIDs.isEmpty { return Array(photosStore.selectedIDs) }
         if let id = focusedID { return [id] }
         return []
     }

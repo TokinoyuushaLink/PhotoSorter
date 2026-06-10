@@ -7,15 +7,19 @@ import AVKit
 struct SinglePhotoView: View {
     let assets: [PhotoAsset]
     let initialIndex: Int
+    var enterTrigger: Int = 0            // increment to re-run entry animation (interrupt dismiss)
     let sourceFrame: CGRect
     let getGridFrame: (Int) -> CGRect
     let onIndexChange: (Int) -> Void
     let onDismissBegin: () -> Void     // called at dismiss start so gradient syncs with animation
+    // Called with the flat grid index just before the dismiss animation; use to scroll grid into view
+    var onBeforeDismiss: ((Int) -> Void)? = nil
     let onDismiss: (Int) -> Void
     var onShortcut: ((Int) -> Void)? = nil
     var panelWidth: CGFloat = 0          // right panel width; photo endRect stops at panel left edge
     var swipeExcludeBottom: CGFloat = 0  // height excluded from swipe zone bottom (floating strip)
     var swipeExcludeRight: CGFloat = 0   // width excluded from swipe zone right (floating panel)
+    var useThumbnailFit: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -30,30 +34,37 @@ struct SinglePhotoView: View {
     @State private var showInspector = false
     @State private var isHoveringVideoArea = false
     @State private var containerGlobalFrame: CGRect = .zero
+    @State private var videoLoop: Bool = UserDefaults.standard.bool(forKey: Prefs.videoLoop)
 
     // Bound to ContentView's focusedFrame so window layout changes (fullscreen) propagate here
     @Binding var dismissSourceFrame: CGRect
 
-    init(assets: [PhotoAsset], initialIndex: Int, sourceFrame: Binding<CGRect>,
+    init(assets: [PhotoAsset], initialIndex: Int, enterTrigger: Int = 0,
+         sourceFrame: Binding<CGRect>,
          getGridFrame: @escaping (Int) -> CGRect,
          onIndexChange: @escaping (Int) -> Void,
          onDismissBegin: @escaping () -> Void,
+         onBeforeDismiss: ((Int) -> Void)? = nil,
          onDismiss: @escaping (Int) -> Void,
          onShortcut: ((Int) -> Void)? = nil,
          panelWidth: CGFloat = 0,
          swipeExcludeBottom: CGFloat = 0,
-         swipeExcludeRight: CGFloat = 0) {
+         swipeExcludeRight: CGFloat = 0,
+         useThumbnailFit: Bool = false) {
         self.assets = assets
         self.initialIndex = initialIndex
+        self.enterTrigger = enterTrigger
         self.sourceFrame = sourceFrame.wrappedValue
         self.getGridFrame = getGridFrame
         self.onIndexChange = onIndexChange
         self.onDismissBegin = onDismissBegin
+        self.onBeforeDismiss = onBeforeDismiss
         self.onDismiss = onDismiss
         self.onShortcut = onShortcut
         self.panelWidth = panelWidth
         self.swipeExcludeBottom = swipeExcludeBottom
         self.swipeExcludeRight = swipeExcludeRight
+        self.useThumbnailFit = useThumbnailFit
         _currentIndex = State(initialValue: initialIndex)
         _dismissSourceFrame = sourceFrame
     }
@@ -92,20 +103,21 @@ struct SinglePhotoView: View {
                    assets[currentIndex].mediaType == .video {
                     let videoAreaW = max(0, w - panelWidth)
                     let barW = videoAreaW * 0.7
-                    // Trigger height: bar height (~36pt) + 16pt bottom gap + 24pt above bar
-                    let triggerH: CGFloat = 76
+                    // Trigger height: bar height (~28pt) + 12pt bottom gap + 16pt above bar
+                    let triggerH: CGFloat = Layout.videoTriggerHeight
                     ZStack(alignment: .bottom) {
                         // NSTrackingArea — same width as the bar, sits flush above the strip
+                        // allowsHitTesting gates NSTrackingArea; disabled until entry animation done.
                         TrackingAreaView { isHoveringVideoArea = $0 }
                             .frame(width: barW, height: triggerH)
-                            .allowsHitTesting(false)
+                            .allowsHitTesting(mediaVisible)
 
                         if mediaVisible, let player = videoPlayers[currentIndex] {
                             VideoControlsBar(player: player)
                                 .frame(width: barW)
                                 .padding(.bottom, 16)
                                 .opacity(isHoveringVideoArea ? 1 : 0)
-                                .animation(.easeInOut(duration: 0.2), value: isHoveringVideoArea)
+                                .animation(.easeInOut(duration: Anim.fadeInOut), value: isHoveringVideoArea)
                                 .allowsHitTesting(isHoveringVideoArea)
                         }
                     }
@@ -122,11 +134,22 @@ struct SinglePhotoView: View {
                     containerGlobalFrame = bg.frame(in: .global)
                 }
         })
-        .task { await enterSequence() }
+        .task(id: enterTrigger) { await enterSequence() }
         .onChange(of: currentIndex) { _, idx in onIndexChange(idx) }
         .onChange(of: assets, handleAssetsChange)
         .onChange(of: mediaVisible) { _, visible in
             guard visible, let player = videoPlayers[currentIndex] else { return }
+            player.seek(to: .zero)
+            player.play()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .videoLoopToggled)) { note in
+            if let val = note.object as? Bool { videoLoop = val }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)) { note in
+            guard videoLoop,
+                  let item = note.object as? AVPlayerItem,
+                  let player = videoPlayers[currentIndex],
+                  player.currentItem === item else { return }
             player.seek(to: .zero)
             player.play()
         }
@@ -145,7 +168,7 @@ struct SinglePhotoView: View {
             let rect = CGRect(x: 0, y: 0, width: max(0, w - panelWidth), height: h)
             PhotoCardView(asset: assets[idx], appeared: true,
                           localSourceFrame: nil, videoPlayer: nil, gifContent: nil,
-                          containerRect: rect)
+                          containerRect: rect, useThumbnailFit: useThumbnailFit)
                 .offset(x: (CGFloat(offset) + navOffset) * w)
                 .opacity(appeared ? 1 : 0)
         }
@@ -167,7 +190,8 @@ struct SinglePhotoView: View {
                 localSourceFrame: localSourceFrame,
                 videoPlayer: mediaVisible && !isNavAnimating ? videoPlayers[currentIndex] : nil,
                 gifContent: mediaVisible && !isNavAnimating ? gifFrames[currentIndex] : nil,
-                containerRect: rect
+                containerRect: rect,
+                useThumbnailFit: useThumbnailFit
             )
             .offset(x: navOffset * w)
             .id(currentIndex)
@@ -178,6 +202,7 @@ struct SinglePhotoView: View {
     private var inspectorOverlay: some View {
         if showInspector, assets.indices.contains(currentIndex) {
             ImageInspectorHUD(asset: assets[currentIndex],
+                              previewSize: assets[currentIndex].preview?.size,
                               index: currentIndex, total: assets.count)
                 .padding(14)
         }
@@ -186,10 +211,15 @@ struct SinglePhotoView: View {
     // MARK: - Entry / Exit
 
     private func enterSequence() async {
+        // Reset in case we're interrupting a dismiss animation
+        mediaVisible = false
+        withoutAnimation { appeared = false }
         loadMedia(for: currentIndex)
         try? await Task.sleep(for: .milliseconds(Anim.enterDelayMs))
+        guard !Task.isCancelled else { return }
         withAnimation(Anim.enter) { appeared = true }
         try? await Task.sleep(for: .milliseconds(Anim.mediaReadyDelayMs))
+        guard !Task.isCancelled else { return }
         mediaVisible = true
     }
 
@@ -200,6 +230,9 @@ struct SinglePhotoView: View {
 
     private func runDismissAnimation(index: Int) {
         onDismissBegin()
+        isHoveringVideoArea = false
+        // Scroll grid so target cell is visible before reading its frame and animating to it
+        onBeforeDismiss?(index)
         let target = getGridFrame(index)
         if target != .zero { dismissSourceFrame = target }
         withAnimation(Anim.dismiss) { appeared = false }
@@ -212,11 +245,21 @@ struct SinglePhotoView: View {
 
     private func handleKey(_ key: CapturedKey) {
         switch key {
-        case .space: dismiss()
-        case .left:  navigateInstant(-1)
-        case .right: navigateInstant(+1)
-        case .info:  showInspector.toggle()
-        case .selectAll: break
+        case .space:     dismiss()
+        case .left:      navigateInstant(-1)
+        case .right:     navigateInstant(+1)
+        case .info:      showInspector.toggle()
+        case .playPause: toggleCurrentVideo()
+        default:         break
+        }
+    }
+
+    private func toggleCurrentVideo() {
+        guard let player = videoPlayers[currentIndex] else { return }
+        if player.timeControlStatus == .playing {
+            player.pause()
+        } else {
+            player.play()
         }
     }
 
@@ -377,6 +420,7 @@ struct PhotoCardView: View {
     let videoPlayer: AVPlayer?
     let gifContent: GIFContent?
     var containerRect: CGRect = .zero  // photo fits within this rect; .zero = full geo
+    var useThumbnailFit: Bool = false
 
     var body: some View {
         GeometryReader { geo in
@@ -392,13 +436,23 @@ struct PhotoCardView: View {
 
             // Entry animation: thumbnail fades out as appeared → true
             if let thumb = ThumbnailCache.shared.cachedImage(for: asset.id) {
-                Image(nsImage: thumb)
-                    .resizable().scaledToFill()
-                    .frame(width: animRect.width, height: animRect.height).clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-                    .position(x: animRect.midX, y: animRect.midY)
-                    .opacity(appeared ? 0 : 1)
-                    .allowsHitTesting(false)
+                if useThumbnailFit {
+                    Image(nsImage: thumb)
+                        .resizable().scaledToFit()
+                        .frame(width: animRect.width, height: animRect.height)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                        .position(x: animRect.midX, y: animRect.midY)
+                        .opacity(appeared ? 0 : 1)
+                        .allowsHitTesting(false)
+                } else {
+                    Image(nsImage: thumb)
+                        .resizable().scaledToFill()
+                        .frame(width: animRect.width, height: animRect.height).clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                        .position(x: animRect.midX, y: animRect.midY)
+                        .opacity(appeared ? 0 : 1)
+                        .allowsHitTesting(false)
+                }
             }
 
             // Video player: fixed at endRect size, scaled down via scaleEffect so SwiftUI
@@ -426,7 +480,24 @@ struct PhotoCardView: View {
             let sz = min(area.width, area.height) * Layout.cardFallbackSizeRatio
             return CGRect(x: area.midX - sz/2, y: area.midY - sz/2, width: sz, height: sz)
         }
-        return CGRect(x: src.minX, y: src.minY, width: src.width, height: src.width)
+        let cellSide = src.width
+        if useThumbnailFit {
+            // Compute the sub-rect the image actually occupies inside the square cell (aspect fit)
+            let ar = aspectRatio > 0 ? aspectRatio : 1
+            let fitW: CGFloat
+            let fitH: CGFloat
+            if ar >= 1 {
+                fitW = cellSide
+                fitH = cellSide / ar
+            } else {
+                fitH = cellSide
+                fitW = cellSide * ar
+            }
+            let ox = src.minX + (cellSide - fitW) / 2
+            let oy = src.minY + (cellSide - fitH) / 2
+            return CGRect(x: ox, y: oy, width: fitW, height: fitH)
+        }
+        return CGRect(x: src.minX, y: src.minY, width: cellSide, height: cellSide)
     }
 
     @ViewBuilder
@@ -468,6 +539,7 @@ struct PhotoCardView: View {
 
 struct ImageInspectorHUD: View {
     let asset: PhotoAsset
+    var previewSize: CGSize? = nil
     let index: Int
     let total: Int
 
@@ -479,7 +551,9 @@ struct ImageInspectorHUD: View {
             Divider()
             row("index", "#\(index + 1) / \(total)  (\(asset.mediaType == .video ? "video" : "photo"))")
             Divider()
-            row("phAsset px", "\(asset.pixelWidth) \u{d7} \(asset.pixelHeight)")
+            row("localIdentifier", asset.id)
+            Divider()
+            row("phAsset px", "\(asset.pixelWidth) \u{d7} \(asset.pixelHeight)  (原始像素)")
             row("phAsset ratio", ratioStr(asset.aspectRatio))
             Divider()
             if let t = ThumbnailCache.shared.cachedImage(for: asset.id) {
@@ -492,6 +566,17 @@ struct ImageInspectorHUD: View {
                     tReps.prefix(1).map { "\(type(of: $0))" }.joined()))
             } else {
                 row("thumbnail", "nil (not cached)")
+            }
+            Divider()
+            let uuid = asset.id.components(separatedBy: "/").first ?? asset.id
+            let firstChar = String(uuid.prefix(1)).uppercased()
+            let diskPath = PhotoLibrary.derivativesBase.map { "\($0)/\(firstChar)/\(uuid)_1_105_c.jpeg" }
+            let hasDisk = diskPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+            row("preview.src", hasDisk ? "disk (_105_c)" : "PHImageManager")
+            if let ps = previewSize {
+                row("preview.size", "\(fmt(ps.width)) \u{d7} \(fmt(ps.height))")
+            } else {
+                row("preview.size", "nil (loading…)")
             }
         }
         .font(.system(size: 10, design: .monospaced))

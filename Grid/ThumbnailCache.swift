@@ -11,7 +11,7 @@ actor ThumbnailCache {
     private var pending: Set<String>       = []
     // FIFO eviction order
     private var order:   [String]          = []
-    private let maxSize  = 400             // ~160 MB BGRA at 320×320
+    private let maxSize  = 400
 
     // Returns cached image immediately (no suspension) — call from cell configure before
     // launching an async task so already-loaded thumbnails appear without a Task hop.
@@ -19,12 +19,10 @@ actor ThumbnailCache {
         cache[id]
     }
 
-    // Full async path: returns cached result or fires a PHImageManager request.
+    // Full async path: direct disk read, fallback to PHImageManager.
     func thumbnail(for id: String, phAsset: PHAsset) async -> NSImage? {
         if let img = cache[id] { return img }
         if pending.contains(id) {
-            // Another task is already loading this id — wait by polling cheaply.
-            // In practice this is rare; a simple retry after a short yield is sufficient.
             for _ in 0..<20 {
                 await Task.yield()
                 if let img = cache[id] { return img }
@@ -33,9 +31,42 @@ actor ThumbnailCache {
         }
         pending.insert(id)
 
-        let img = await withCheckedContinuation { (cont: CheckedContinuation<NSImage?, Never>) in
+        let img: NSImage?
+        if let direct = directReadImage(phAsset: phAsset) {
+            img = direct
+        } else {
+            img = await phImageManagerLoad(phAsset: phAsset)
+        }
+
+        pending.remove(id)
+        guard let img else { return nil }
+        let normalized = normalizeForSwiftUI(img)
+        store(id: id, image: normalized)
+        return normalized
+    }
+
+    func invalidate() {
+        cache   = [:]
+        pending = []
+        order   = []
+    }
+
+    // MARK: - Private
+
+    private func directReadImage(phAsset: PHAsset) -> NSImage? {
+        guard let base = PhotoLibrary.mastersBase else { return nil }
+        let uuid = phAsset.localIdentifier.components(separatedBy: "/").first ?? phAsset.localIdentifier
+        let dir  = "\(base)/\(String(uuid.prefix(1)).uppercased())"
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir),
+              let match = files.first(where: { $0.hasPrefix(uuid) })
+        else { return nil }
+        return NSImage(contentsOfFile: "\(dir)/\(match)")
+    }
+
+    private func phImageManagerLoad(phAsset: PHAsset) async -> NSImage? {
+        await withCheckedContinuation { (cont: CheckedContinuation<NSImage?, Never>) in
             let opts = PHImageRequestOptions()
-            opts.deliveryMode = .highQualityFormat   // single callback, no double-fire
+            opts.deliveryMode = .highQualityFormat
             opts.resizeMode   = .fast
             opts.isNetworkAccessAllowed = true
             opts.isSynchronous = false
@@ -46,26 +77,7 @@ actor ThumbnailCache {
                 options: opts
             ) { image, _ in cont.resume(returning: image) }
         }
-
-        pending.remove(id)
-        guard let img else { return nil }
-        let normalized = normalizeForSwiftUI(img)
-        store(id: id, image: normalized)
-        return normalized
     }
-
-    // Eagerly cancel pending PHImageManager requests when the cell is reused.
-    // We can't cancel individual PHImageManager requests without tracking request IDs,
-    // so we just mark the id as no longer needed; the Task on the cell side is cancelled
-    // by PhotoCell.prepareForReuse — which is sufficient.
-
-    func invalidate() {
-        cache   = [:]
-        pending = []
-        order   = []
-    }
-
-    // MARK: - Private
 
     func store(id: String, image: NSImage) {
         cache[id] = image

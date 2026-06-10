@@ -3,7 +3,7 @@ import AppKit
 
 // MARK: - Key Types
 
-enum CapturedKey { case space, left, right, info, selectAll }
+enum CapturedKey { case space, left, right, info, selectAll, playPause }
 
 // MARK: - Grid Key Handler (first-responder based, space key only)
 
@@ -53,8 +53,10 @@ struct KeyMonitorView: NSViewRepresentable {
             self.onShortcut = onShortcut
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self else { return event }
+                let opt = event.modifierFlags.contains(.option)
                 switch event.keyCode {
-                case 49:  self.onKey?(.space);  return nil
+                case 49 where opt:  self.onKey?(.playPause); return nil
+                case 49:            self.onKey?(.space);     return nil
                 case 123: self.onKey?(.left);   return nil
                 case 124: self.onKey?(.right);  return nil
                 case 34:  self.onKey?(.info);   return nil

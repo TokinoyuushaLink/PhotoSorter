@@ -73,17 +73,33 @@ struct VideoControlsBar: View {
     @State private var duration: Double = 1
     @State private var isScrubbing = false
     @State private var scrubValue: Double = 0
-    @State private var timeObserver: Any?
     @State private var isMuted = false
+    @State private var scrubberWidth: CGFloat = 1
     /// Whether the player was playing before scrub began — restored after seek completes.
     @State private var wasPlayingBeforeScrub = false
+
+    // Held by the Coordinator so @State copy semantics don't break removeTimeObserver.
+    @State private var coordinator = Coordinator()
 
     private var displayTime: Double { isScrubbing ? scrubValue : currentTime }
 
     var body: some View {
         controlBar
-            .onAppear { attachObserver() }
-            .onDisappear { detachObserver() }
+            .onAppear {
+                coordinator.attach(player: player,
+                                   onTick: { [self] time, dur, playing in
+                    guard !isScrubbing else { return }
+                    currentTime = time
+                    duration = dur
+                    isPlaying = playing
+                })
+                isPlaying = player.timeControlStatus == .playing
+                isMuted = player.isMuted
+                if let d = player.currentItem?.duration, d.isValid, d.isNumeric {
+                    duration = d.seconds
+                }
+            }
+            .onDisappear { coordinator.detach(from: player) }
     }
 
     // MARK: Bar Layout
@@ -94,7 +110,7 @@ struct VideoControlsBar: View {
             Button(action: togglePlay) {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28)
+                    .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -125,7 +141,7 @@ struct VideoControlsBar: View {
             .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 10))
         .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
     }
@@ -144,49 +160,49 @@ struct VideoControlsBar: View {
 
     private var scrubber: some View {
         let filled = duration > 0 ? displayTime / duration : 0
-        // Track height only changes during drag; no animation to avoid click flash.
         let trackH: CGFloat = isScrubbing ? 4 : 3
         let thumbD: CGFloat = 14
 
-        return Capsule()
-            .fill(scrubTrackColor)
-            .frame(height: trackH)
-            .overlay(alignment: .leading) {
-                GeometryReader { geo in
-                    Capsule()
-                        .fill(scrubFillColor)
-                        .frame(width: max(0, geo.size.width * CGFloat(filled)), height: trackH)
-                }
+        return GeometryReader { geo in
+            let w = geo.size.width
+            let fillW = max(0, w * CGFloat(filled))
+            let thumbX = fillW - thumbD / 2
+
+            ZStack(alignment: .leading) {
+                // Track
+                Capsule()
+                    .fill(scrubTrackColor)
+                    .frame(height: trackH)
+
+                // Fill
+                Capsule()
+                    .fill(scrubFillColor)
+                    .frame(width: fillW, height: trackH)
+
+                // Thumb
+                Circle()
+                    .fill(scrubFillColor)
+                    .frame(width: thumbD, height: thumbD)
+                    .shadow(color: .black.opacity(0.25), radius: 2)
+                    .offset(x: thumbX, y: 0)
+                    .opacity(isScrubbing ? 1 : 0)
             }
-            .overlay(alignment: .leading) {
-                GeometryReader { geo in
-                    let x = max(0, geo.size.width * CGFloat(filled))
-                    Circle()
-                        .fill(scrubFillColor)
-                        .frame(width: thumbD, height: thumbD)
-                        .shadow(color: .black.opacity(0.25), radius: 2)
-                        .offset(x: x - thumbD / 2, y: (trackH - thumbD) / 2)
-                        .opacity(isScrubbing ? 1 : 0)
-                }
-            }
-            .frame(height: 20)
+            .frame(height: thumbD)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { v in
                         if !isScrubbing {
-                            // Pause on first touch so the player doesn't race the scrub position
                             wasPlayingBeforeScrub = player.timeControlStatus == .playing
                             player.pause()
                             isScrubbing = true
                         }
-                        scrubValue = fraction(at: v.location.x) * duration
+                        scrubValue = max(0, min(1, Double(v.location.x / w))) * duration
                     }
                     .onEnded { v in
-                        let t = fraction(at: v.location.x) * duration
+                        let t = max(0, min(1, Double(v.location.x / w))) * duration
                         scrubValue = t
-                        // isScrubbing stays true until seek lands so timeObserver is blocked
-                        // throughout; currentTime only updates after the player is at target.
+                        // isScrubbing clears only after seek completes to prevent position flash.
                         player.seek(to: CMTime(seconds: t, preferredTimescale: 600),
                                     toleranceBefore: .zero, toleranceAfter: .zero) { finished in
                             guard finished else { return }
@@ -198,24 +214,10 @@ struct VideoControlsBar: View {
                         }
                     }
             )
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .preference(key: WidthKey.self, value: geo.size.width)
-                }
-            )
-    }
-
-    @State private var scrubberWidth: CGFloat = 1
-
-    private func fraction(at x: CGFloat) -> Double {
-        let w = scrubberWidth > 1 ? scrubberWidth : 200
-        return max(0, min(1, Double(x / w)))
-    }
-
-    private struct WidthKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+            .onAppear { scrubberWidth = w }
+            .onChange(of: w) { _, new in scrubberWidth = new }
+        }
+        .frame(height: thumbD)
     }
 
     // MARK: Actions
@@ -224,7 +226,6 @@ struct VideoControlsBar: View {
         if isPlaying {
             player.pause()
         } else {
-            // Loop: if at end, restart
             let ct = player.currentTime()
             let dur = player.currentItem?.duration ?? .invalid
             if dur.isValid && dur.isNumeric && ct >= dur - CMTime(seconds: 0.3, preferredTimescale: 600) {
@@ -239,33 +240,26 @@ struct VideoControlsBar: View {
         player.isMuted = isMuted
     }
 
-    // MARK: Time Observer
+    // MARK: Time Observer Coordinator
 
-    private func attachObserver() {
-        // Duration
-        if let item = player.currentItem {
-            let d = item.duration
-            if d.isValid && d.isNumeric { duration = d.seconds }
-        }
-        // Periodic update (every ~0.1 s)
-        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
-        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
-            // Block all state updates while scrubbing — seek completion handler sets currentTime
-            // and clears isScrubbing atomically, preventing any intermediate position flash.
-            guard !isScrubbing else { return }
-            currentTime = time.seconds
-            if let d = player.currentItem?.duration, d.isValid, d.isNumeric {
-                duration = d.seconds
+    /// Holds the opaque observer token so it survives @State value-copy semantics.
+    @Observable
+    final class Coordinator {
+        private var token: Any?
+
+        func attach(player: AVPlayer, onTick: @escaping (Double, Double, Bool) -> Void) {
+            guard token == nil else { return }
+            let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+            token = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+                let dur = player.currentItem?.duration
+                let durSec = (dur?.isValid == true && dur?.isNumeric == true) ? dur!.seconds : 1.0
+                onTick(time.seconds, durSec, player.timeControlStatus == .playing)
             }
-            isPlaying = player.timeControlStatus == .playing
         }
-        isPlaying = player.timeControlStatus == .playing
-        isMuted = player.isMuted
-    }
 
-    private func detachObserver() {
-        if let obs = timeObserver { player.removeTimeObserver(obs) }
-        timeObserver = nil
+        func detach(from player: AVPlayer) {
+            if let t = token { player.removeTimeObserver(t); token = nil }
+        }
     }
 
     private func formatTime(_ t: Double) -> String {

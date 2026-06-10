@@ -76,9 +76,9 @@ struct ColumnBrowserView: View {
             selections = Array(selections.prefix(colIdx + 1))
             if !node.isFolder {
                 onAssign(node)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Anim.columnHighlightDelay) {
                     selections = newSelections
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Anim.columnClearDelay) {
                         newSelections[colIdx] = nil
                         selections = newSelections
                     }

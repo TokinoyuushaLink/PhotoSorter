@@ -12,6 +12,7 @@ struct PhotoGridView: View {
     @Binding var bottomGradientOpacity: CGFloat
     var topPadding: CGFloat = 0
     var bottomPadding: CGFloat = 0
+    var useThumbnailFit: Bool = false
     var sections: [SectionData]? = nil     // nil = uncategorized mode (uses store.assets)
     var externalSelectedIDs: Binding<Set<String>>? = nil
     var onSelectAll: (() -> Void)? = nil   // called by Cmd+A in section mode
@@ -56,10 +57,9 @@ struct PhotoGridView: View {
                         focusedID: $focusedID,
                         focusedFrame: $focusedFrame,
                         gridLayout: gridLayout,
-                        cols: cols,
-                        cellSize: cellSize,
                         topPadding: topPadding,
                         bottomPadding: bottomPadding,
+                        useThumbnailFit: useThumbnailFit,
                         sections: sections,
                         externalSelectedIDs: externalSelectedIDs,
                         onScrollChange: { offsetY, contentH, containerH in
@@ -71,7 +71,7 @@ struct PhotoGridView: View {
                         onFrameProviderReady: { provider in
                             frameProvider = provider
                             onFrameProviderReady?(provider)
-                        }
+                        },
                     )
                     .onChange(of: geo.size, initial: true) { _, _ in
                         rebuildLayout(geo: geo)

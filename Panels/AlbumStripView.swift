@@ -19,40 +19,6 @@ private extension NSView {
     }
 }
 
-// MARK: - Stable NSTrackingArea wrapper
-
-struct TrackingAreaView: NSViewRepresentable {
-    var onHover: (Bool) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let v = TrackingNSView()
-        v.onHover = onHover
-        return v
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? TrackingNSView)?.onHover = onHover
-    }
-
-    private class TrackingNSView: NSView {
-        var onHover: ((Bool) -> Void)?
-
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            trackingAreas.forEach { removeTrackingArea($0) }
-            addTrackingArea(NSTrackingArea(
-                rect: bounds,
-                options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-                owner: self,
-                userInfo: nil
-            ))
-        }
-
-        override func mouseEntered(with event: NSEvent) { onHover?(true) }
-        override func mouseExited(with event: NSEvent)  { onHover?(false) }
-    }
-}
-
 // MARK: - NSCollectionView favorite strip
 
 private final class ChipCell: NSCollectionViewItem {
@@ -397,7 +363,7 @@ private final class FavoriteCollectionView: NSView,
 
             // 3. 对每个 X 位置变化了的 cell，用 transform.translation.x 从偏移量动画回 0
             //    完全在 cell 自身坐标系操作，不受父子坐标系影响
-            let duration: CFTimeInterval = 0.2
+            let duration: CFTimeInterval = Anim.dragSettleDuration
             let timing = CAMediaTimingFunction(name: .easeInEaseOut)
             let srcID = self.dragSrcIndex.map { self.displayNodes[$0].id }
 
@@ -436,7 +402,7 @@ private final class FavoriteCollectionView: NSView,
         if let dv = dragView,
            let attrs = collectionView.layoutAttributesForItem(at: IndexPath(item: src, section: 0)) {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.15
+                ctx.duration = Anim.dragCommitDuration
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 dv.animator().frame.origin.x = attrs.frame.origin.x
             } completionHandler: { [weak self] in
@@ -530,7 +496,7 @@ struct AlbumStripCombined: View {
             .scrollBounceBehavior(.basedOnSize)
             .frame(height: rowHeight)
             .opacity(shouldHide ? 0 : 1)
-            .animation(.easeInOut(duration: 0.2), value: shouldHide)
+            .animation(.easeInOut(duration: Anim.fadeInOut), value: shouldHide)
             .allowsHitTesting(!shouldHide)
         }
         .frame(height: hoverTriggerH)
@@ -607,7 +573,7 @@ struct AlbumStripCombined: View {
             Text(title).font(.caption.weight(.semibold))
                 .foregroundStyle(forceLightText ? Color.white.opacity(0.85) : Color.secondary)
         }
-        .animation(.easeInOut(duration: 0.2), value: forceLightText)
+        .animation(.easeInOut(duration: Anim.fadeInOut), value: forceLightText)
         .frame(width: 60, alignment: .leading)
         .padding(.leading, 10)
     }
@@ -616,7 +582,7 @@ struct AlbumStripCombined: View {
         HStack {
             Text(text).font(.caption2)
                 .foregroundStyle(forceLightText ? AnyShapeStyle(Color.white.opacity(0.4)) : AnyShapeStyle(.tertiary))
-                .animation(.easeInOut(duration: 0.2), value: forceLightText)
+                .animation(.easeInOut(duration: Anim.fadeInOut), value: forceLightText)
                 .padding(.horizontal, 10)
             Spacer(minLength: 0)
         }

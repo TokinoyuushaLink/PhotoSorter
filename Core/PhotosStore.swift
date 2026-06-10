@@ -115,41 +115,55 @@ final class PhotosStore {
 
     // MARK: Previews（图片原始比例，供单图模式使用）
 
-    private func loadPreviewsBatched() {
-        let ids = assets.map(\.id)
+    func loadPreviewIfNeeded(for id: String) {
+        guard let idx = assetIndexByID[id], idx < assets.count, assets[idx].preview == nil else { return }
+        guard let phAsset = phAssetCache[id] else { return }
+        thumbQueue.async { [weak self] in
+            self?.loadPreviewOne(id: id, phAsset: phAsset)
+        }
+    }
+
+    private func loadPreviewOne(id: String, phAsset: PHAsset) {
+        let uuid = id.components(separatedBy: "/").first ?? id
+        let firstChar = String(uuid.prefix(1)).uppercased()
+        if let base = PhotoLibrary.derivativesBase,
+           let image = NSImage(contentsOfFile: "\(base)/\(firstChar)/\(uuid)_1_105_c.jpeg") {
+            let normalized = normalizeForSwiftUI(image)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let idx = self.assetIndexByID[id],
+                      idx < self.assets.count, self.assets[idx].id == id else { return }
+                withoutAnimation { self.assets[idx].preview = normalized }
+            }
+            return
+        }
         let opts = PHImageRequestOptions()
-        opts.deliveryMode = .opportunistic
+        opts.deliveryMode = .highQualityFormat
         opts.isNetworkAccessAllowed = true
         opts.isSynchronous = false
+        PHImageManager.default().requestImage(
+            for: phAsset, targetSize: Layout.previewSize,
+            contentMode: .aspectFit, options: opts
+        ) { [weak self] image, _ in
+            guard let image, let self else { return }
+            let normalized = normalizeForSwiftUI(image)
+            DispatchQueue.main.async {
+                guard let idx = self.assetIndexByID[id],
+                      idx < self.assets.count, self.assets[idx].id == id else { return }
+                withoutAnimation { self.assets[idx].preview = normalized }
+            }
+        }
+    }
 
-        for (i, start) in stride(from: 0, to: ids.count, by: Layout.previewBatchSize).enumerated() {
-            let batch = Array(ids[start..<min(start + Layout.previewBatchSize, ids.count)])
+    private func loadPreviewsBatched() {
+        let snapshot = assets.map { (id: $0.id, phAsset: phAssetCache[$0.id]) }
+
+        for (i, start) in stride(from: 0, to: snapshot.count, by: Layout.previewBatchSize).enumerated() {
+            let batch = Array(snapshot[start..<min(start + Layout.previewBatchSize, snapshot.count)])
             thumbQueue.asyncAfter(deadline: .now() + Double(i) * Layout.previewBatchDelay) { [weak self] in
                 guard let self else { return }
-                for id in batch {
-                    guard let phAsset = self.phAssetCache[id] else { continue }
-                    PHImageManager.default().requestImage(
-                        for: phAsset,
-                        targetSize: Layout.previewSize,
-                        contentMode: .aspectFit,
-                        options: opts
-                    ) { image, info in
-                        guard let image else { return }
-                        let isDegraded = info?[PHImageResultIsDegradedKey] as? Bool ?? false
-                        let normalized = normalizeForSwiftUI(image)
-                        DispatchQueue.main.async {
-                            guard let idx = self.assetIndexByID[id],
-                                  idx < self.assets.count,
-                                  self.assets[idx].id == id else { return }
-                            withoutAnimation {
-                                if isDegraded {
-                                    if self.assets[idx].preview == nil { self.assets[idx].preview = normalized }
-                                } else {
-                                    self.assets[idx].preview = normalized
-                                }
-                            }
-                        }
-                    }
+                for item in batch {
+                    guard let phAsset = item.phAsset else { continue }
+                    self.loadPreviewOne(id: item.id, phAsset: phAsset)
                 }
             }
         }

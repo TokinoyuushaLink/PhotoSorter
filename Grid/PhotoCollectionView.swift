@@ -16,10 +16,9 @@ struct PhotoCollectionView: NSViewRepresentable {
     @Binding var focusedID: String?
     @Binding var focusedFrame: CGRect
     var gridLayout: GridLayout
-    var cols: Int
-    var cellSize: CGFloat
     var topPadding: CGFloat
     var bottomPadding: CGFloat
+    var useThumbnailFit: Bool = false
     // When non-nil, use section-based rendering instead of store.assets
     var sections: [SectionData]?
     // When non-nil, section-mode tap/selection operates on this set instead of store.selectedIDs
@@ -52,6 +51,8 @@ struct PhotoCollectionView: NSViewRepresentable {
             c?.handleTap(indexPath: ip, isCommand: isCmd, isShift: isShift)
         }
         cv.onTapBackground = { [weak c] in c?.handleBackgroundTap() }
+        cv.onWidthWillChange = { [weak c] in c?.captureResizeAnchor() }
+        cv.onWidthDidChange  = { [weak c] in c?.applyResizeAnchor() }
 
         let sv = NSScrollView()
         sv.documentView = cv
@@ -66,6 +67,7 @@ struct PhotoCollectionView: NSViewRepresentable {
         c.observeScroll(sv)
 
         onFrameProviderReady?({ [weak c] index in c?.swiftUIFrame(forFlatIndex: index) ?? .zero })
+        gridLayout.scrollToVisible = { [weak c] index in c?.scrollToVisible(flatIndex: index) }
 
         DispatchQueue.main.async { [weak c] in c?.reportScroll() }
 
@@ -92,6 +94,20 @@ struct PhotoCollectionView: NSViewRepresentable {
         if c.lastGridOriginY != newOriginY {
             c.lastGridOriginY = newOriginY
             DispatchQueue.main.async { [weak c] in c?.reportScroll() }
+        }
+
+        // When fit mode toggles, reconfigure all visible cells immediately
+        if c.lastUseFit != useThumbnailFit {
+            c.lastUseFit = useThumbnailFit
+            let selIDs = externalSelectedIDs?.wrappedValue ?? store.selectedIDs
+            for ip in cv.indexPathsForVisibleItems() {
+                guard let cell = cv.item(at: ip) as? PhotoCell,
+                      let asset = c.asset(at: ip) else { continue }
+                cell.configure(asset: asset, store: store,
+                               isFocused: focusedID == asset.id,
+                               isCellSelected: selIDs.contains(asset.id),
+                               useFit: useThumbnailFit)
+            }
         }
 
         // Reload check — differs based on whether we're in section mode
@@ -150,7 +166,7 @@ struct PhotoCollectionView: NSViewRepresentable {
 
                 if !deletes.isEmpty || !inserts.isEmpty {
                     NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0.28
+                        ctx.duration = Anim.batchUpdateDuration
                         cv.animator().performBatchUpdates({
                             if !deletes.isEmpty { cv.deleteItems(at: Set(deletes)) }
                             if !inserts.isEmpty { cv.insertItems(at: Set(inserts)) }
@@ -180,7 +196,7 @@ struct PhotoCollectionView: NSViewRepresentable {
             let nowFocused  = focusedID == asset.id
             let nowSelected = selIDs.contains(asset.id)
             if cell.isFocused != nowFocused || cell.isCellSelected != nowSelected {
-                cell.configure(asset: asset, store: store, isFocused: nowFocused, isCellSelected: nowSelected)
+                cell.updateOverlays(isFocused: nowFocused, isCellSelected: nowSelected)
             }
         }
     }
@@ -197,17 +213,20 @@ struct PhotoCollectionView: NSViewRepresentable {
         var lastTopPad: CGFloat  = -1
         var lastBottomPad: CGFloat = -1
         var lastGridOriginY: CGFloat = .nan
+        var lastUseFit: Bool = false
         var anchorIndexPath: IndexPath? = nil
         // Committed snapshot used as the data source — kept in sync before batch updates
         var cachedSections: [SectionData] = []
         private var scrollObs: Any?
-        private var windowObs: Any?
+        // Flat item index of the first item in the anchor row (stable across column-count changes)
+        private var resizeAnchorFlatItem: Int? = nil
+        // How far the anchor row's center was from the viewport top (content-space delta)
+        private var resizeAnchorViewportDelta: CGFloat = 0
 
         init(_ parent: PhotoCollectionView) { self.parent = parent }
 
         deinit {
             if let o = scrollObs { NotificationCenter.default.removeObserver(o) }
-            if let o = windowObs { NotificationCenter.default.removeObserver(o) }
         }
 
         // MARK: Helpers
@@ -230,7 +249,7 @@ struct PhotoCollectionView: NSViewRepresentable {
             guard let layout = cv?.collectionViewLayout as? SquareGridLayout else { return }
             var heights: [Int: CGFloat] = [:]
             for (i, sec) in secs.enumerated() where sec.header != nil {
-                heights[i] = i == 0 ? parent.topPadding : 48
+                heights[i] = i == 0 ? parent.topPadding : Layout.sortedSectionHeaderHeight
             }
             layout.headerHeights = heights
             layout.topPadding    = parent.topPadding
@@ -257,19 +276,156 @@ struct PhotoCollectionView: NSViewRepresentable {
             ) { [weak self] _ in self?.reportScroll() }
         }
 
-        func observeWindow(_ window: NSWindow) {
-            guard windowObs == nil else { return }
-            windowObs = NotificationCenter.default.addObserver(
-                forName: NSWindow.didResizeNotification,
-                object: window, queue: .main
-            ) { [weak self] _ in
-                DispatchQueue.main.async { self?.reportScroll() }
+        // Called before resize: record which item is at the viewport center row.
+        func captureResizeAnchor() {
+            guard let sv, let cv,
+                  let layout = cv.collectionViewLayout as? SquareGridLayout,
+                  layout.side > 0, layout.cols > 0 else {
+                resizeAnchorFlatItem = nil
+                return
             }
+            let offsetY   = sv.documentVisibleRect.origin.y
+            let viewportH = sv.bounds.height
+            let centerY   = offsetY + viewportH / 2
+
+            let sp   = layout.spacing
+            let step = layout.side + sp
+            let secs = currentSections()
+            let infos = layout.sectionInfosSnapshot()
+
+            var flatOffset = 0
+            var anchorFlat: Int? = nil
+            var anchorRowCenterY: CGFloat = 0
+
+            for (s, info) in infos.enumerated() {
+                let count = s < secs.count ? secs[s].assets.count : 0
+                guard count > 0 else { continue }
+                let cols = layout.cols
+                let rows = (count + cols - 1) / cols
+                let sectionBottom = info.itemsOriginY + CGFloat(rows) * step - sp
+
+                if centerY <= sectionBottom || s == infos.count - 1 {
+                    let rowInSec  = max(0, min(Int((centerY - info.itemsOriginY) / step), rows - 1))
+                    let firstItem = rowInSec * cols       // first item index within this section
+                    anchorFlat       = flatOffset + min(firstItem, count - 1)
+                    anchorRowCenterY = info.itemsOriginY + CGFloat(rowInSec) * step + layout.side / 2
+                    break
+                }
+                flatOffset += count
+            }
+
+            if let flat = anchorFlat {
+                resizeAnchorFlatItem      = flat
+                // How far the row center sits below the viewport top — preserved after resize
+                resizeAnchorViewportDelta = anchorRowCenterY - offsetY
+            } else {
+                resizeAnchorFlatItem = nil
+            }
+        }
+
+        // After resize: scroll so the anchor row's center stays at the same viewport position.
+        // Called every frame during live resize — do NOT clear resizeAnchorFlatItem here.
+        func applyResizeAnchor() {
+            guard let sv, let cv,
+                  let layout = cv.collectionViewLayout as? SquareGridLayout,
+                  let anchorFlat = resizeAnchorFlatItem else {
+                reportScroll()
+                return
+            }
+
+            // Ensure layout has finished recalculating for the new width
+            cv.layoutSubtreeIfNeeded()
+
+            guard layout.side > 0, layout.cols > 0 else { reportScroll(); return }
+
+            // Find the IndexPath for anchorFlat in the new layout
+            let secs = currentSections()
+            guard let ip = flatIndexToIndexPath(anchorFlat, secs: secs) else {
+                reportScroll(); return
+            }
+
+            // Use the layout's row geometry directly (more reliable than layoutAttributesForItem
+            // when called right after an invalidation)
+            let infos = layout.sectionInfosSnapshot()
+            guard ip.section < infos.count else { reportScroll(); return }
+            let info  = infos[ip.section]
+            let cols  = layout.cols
+            let row   = ip.item / cols
+            let sp    = layout.spacing
+            let newRowCenterY = info.itemsOriginY + CGFloat(row) * (layout.side + sp) + layout.side / 2
+
+            let newOffsetY  = newRowCenterY - resizeAnchorViewportDelta
+            let contentH    = layout.collectionViewContentSize.height
+            let viewportH   = sv.bounds.height
+            let clamped     = max(0, min(newOffsetY, contentH - viewportH))
+
+            sv.contentView.scroll(to: NSPoint(x: 0, y: clamped))
+            sv.reflectScrolledClipView(sv.contentView)
+            reportScroll()
+        }
+
+        // Flat index → IndexPath, using the current column count in layout.
+        private func flatIndexToIndexPath(_ flat: Int, secs: [SectionData]) -> IndexPath? {
+            var remaining = flat
+            for (s, sec) in secs.enumerated() {
+                if remaining < sec.assets.count {
+                    return IndexPath(item: remaining, section: s)
+                }
+                remaining -= sec.assets.count
+            }
+            return nil
         }
 
         func reportScroll() {
             guard let sv, let cv else { return }
             parent.onScrollChange(sv.documentVisibleRect.origin.y, cv.frame.height, sv.bounds.height)
+        }
+
+        // MARK: Scroll to visible
+
+        /// Instantly scroll the grid so that the item at `flatIndex` is within the visible area
+        /// (between the top and bottom gradient zones). Meant to be called synchronously before
+        /// a dismiss animation begins, so the animation target lands inside the viewport.
+        func scrollToVisible(flatIndex flat: Int) {
+            NSLog("[scrollToVisible] flat=%d sv=%@ cv=%@", flat, sv != nil ? "SET" : "NIL", cv != nil ? "SET" : "NIL")
+            guard let sv, let cv,
+                  let ip = indexPath(forFlatIndex: flat),
+                  let attrs = cv.collectionViewLayout?.layoutAttributesForItem(at: ip) else {
+                NSLog("[scrollToVisible] guard failed ip=%@ attrs=%@",
+                      indexPath(forFlatIndex: flat) != nil ? "OK" : "NIL",
+                      "?")
+                return
+            }
+
+            let curOffset = sv.documentVisibleRect.origin.y
+            let topInset  = parent.topPadding
+            let botInset  = parent.bottomPadding
+            let viewportH = sv.bounds.height
+            let safeTop    = curOffset + topInset
+            let safeBottom = curOffset + viewportH - botInset
+            let itemTop    = attrs.frame.minY
+            let itemBottom = attrs.frame.maxY
+
+            if itemTop >= safeTop && itemBottom <= safeBottom { return }   // already visible
+
+            let contentH  = cv.collectionViewLayout?.collectionViewContentSize.height ?? cv.frame.height
+            let maxOffset = max(0, contentH - viewportH)
+
+            var newOffset: CGFloat
+            if itemTop < safeTop {
+                newOffset = itemTop - topInset
+            } else {
+                newOffset = itemBottom + botInset - viewportH
+            }
+            newOffset = max(0, min(newOffset, maxOffset))
+            guard abs(newOffset - curOffset) > 0.5 else { return }
+
+            // sv.contentView.scroll + reflectScrolledClipView is the correct way to
+            // programmatically scroll NSScrollView so that documentVisibleRect updates
+            // synchronously within the same runloop turn.
+            sv.contentView.scroll(to: NSPoint(x: 0, y: newOffset))
+            sv.reflectScrolledClipView(sv.contentView)
+            reportScroll()
         }
 
         // MARK: Frame
@@ -283,7 +439,6 @@ struct PhotoCollectionView: NSViewRepresentable {
             guard let cv, let sv, let window = cv.window,
                   let contentView = window.contentView,
                   let attrs = cv.collectionViewLayout?.layoutAttributesForItem(at: ip) else { return .zero }
-            observeWindow(window)
             let scrollY = sv.documentVisibleRect.origin.y
             let itemInCV = CGRect(
                 x: attrs.frame.origin.x,
@@ -375,7 +530,8 @@ struct PhotoCollectionView: NSViewRepresentable {
                 asset: asset,
                 store: parent.store,
                 isFocused: parent.focusedID == asset.id,
-                isCellSelected: selIDs.contains(asset.id)
+                isCellSelected: selIDs.contains(asset.id),
+                useFit: parent.useThumbnailFit
             )
             return cell
         }
@@ -404,7 +560,8 @@ struct PhotoCollectionView: NSViewRepresentable {
             let selIDs = parent.externalSelectedIDs?.wrappedValue ?? parent.store.selectedIDs
             cell.configure(asset: asset, store: parent.store,
                            isFocused: parent.focusedID == asset.id,
-                           isCellSelected: selIDs.contains(asset.id))
+                           isCellSelected: selIDs.contains(asset.id),
+                           useFit: parent.useThumbnailFit)
         }
     }
 }
@@ -479,16 +636,18 @@ final class SquareGridLayout: NSCollectionViewLayout {
     var headerHeights: [Int: CGFloat] = [:]
 
     // Per-section geometry computed in prepare() — no per-item objects stored.
-    private struct SectionInfo {
+    struct SectionInfo {
         let itemsOriginY: CGFloat   // y where row 0 of this section starts
         let count: Int
         let headerFrame: CGRect     // .zero if no header
     }
     private var sections: [SectionInfo] = []
-    private var cols: Int = 2
-    private var side: CGFloat = 0
+    private(set) var cols: Int = 2
+    private(set) var side: CGFloat = 0
     private var cvWidth: CGFloat = 0
     private var contentSize: NSSize = .zero
+
+    func sectionInfosSnapshot() -> [SectionInfo] { sections }
 
     override func prepare() {
         super.prepare()
@@ -601,14 +760,19 @@ final class SquareGridLayout: NSCollectionViewLayout {
 final class TapCollectionView: NSCollectionView {
     var onTapItem: ((IndexPath, Bool, Bool) -> Void)?
     var onTapBackground: (() -> Void)?
+    var onWidthWillChange: (() -> Void)?    // called before width changes, layout still old
+    var onWidthDidChange: (() -> Void)?     // called after width changes and layout is invalidated
     // Authoritative width set synchronously in setFrameSize, before invalidateLayout fires.
     // cv.bounds.width may lag by one layout pass; reading this avoids the 5-10px desync.
     private(set) var currentWidth: CGFloat = 0
 
     override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = abs(newSize.width - currentWidth) > 0.5
+        if widthChanged { onWidthWillChange?() }
         currentWidth = newSize.width
         super.setFrameSize(newSize)
         collectionViewLayout?.invalidateLayout()
+        if widthChanged { onWidthDidChange?() }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -629,30 +793,91 @@ final class TapCollectionView: NSCollectionView {
 final class PhotoCell: NSCollectionViewItem {
     static let reuseID = NSUserInterfaceItemIdentifier("PhotoCell")
 
-    private var hosting: NSHostingView<ThumbnailView>?
     private var loadTask: Task<Void, Never>?
     private(set) var isFocused      = false
     private(set) var isCellSelected = false
     private(set) var configuredID: String? = nil
+    private var useFit: Bool = false
+    private var assetAspectRatio: CGFloat = 1
 
-    override func loadView() { self.view = NSView() }
+    private let thumbLayer   = CALayer()
+    private let borderLayer  = CALayer()
+    private let overlayView  = CellOverlayView()
 
-    func configure(asset: PhotoAsset, store: PhotosStore, isFocused: Bool, isCellSelected: Bool) {
+    override func loadView() {
+        let v = NSView()
+        v.wantsLayer = true
+
+        thumbLayer.masksToBounds = true
+        thumbLayer.cornerRadius  = 3
+        v.layer?.addSublayer(thumbLayer)
+
+        borderLayer.cornerRadius    = 3
+        borderLayer.masksToBounds   = false
+        borderLayer.backgroundColor = .clear
+        v.layer?.addSublayer(borderLayer)
+
+        overlayView.autoresizingMask = [.width, .height]
+        overlayView.wantsLayer = true
+        v.addSubview(overlayView)
+        self.view = v
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        thumbLayer.frame  = view.bounds
+        borderLayer.frame = fitImageRect()
+        overlayView.frame = view.bounds
+        CATransaction.commit()
+        overlayView.fitRect = useFit ? fitImageRect() : nil
+    }
+
+    // Sub-rect the image occupies in fit mode; full bounds in fill mode.
+    private func fitImageRect() -> CGRect {
+        let b = view.bounds
+        guard useFit, b.width > 0, b.height > 0 else { return b }
+        let ar = assetAspectRatio > 0 ? assetAspectRatio : 1
+        let fitW: CGFloat
+        let fitH: CGFloat
+        if ar >= 1 {
+            fitW = b.width
+            fitH = b.width / ar
+        } else {
+            fitH = b.height
+            fitW = b.height * ar
+        }
+        return CGRect(x: (b.width - fitW) / 2, y: (b.height - fitH) / 2,
+                      width: fitW, height: fitH)
+    }
+
+    func configure(asset: PhotoAsset, store: PhotosStore, isFocused: Bool, isCellSelected: Bool, useFit: Bool = false) {
         let idChanged = configuredID != asset.id
-        self.isFocused      = isFocused
-        self.isCellSelected = isCellSelected
-        self.configuredID   = asset.id
+        self.isFocused        = isFocused
+        self.isCellSelected   = isCellSelected
+        self.configuredID     = asset.id
+        self.useFit           = useFit
+        self.assetAspectRatio = asset.aspectRatio > 0 ? asset.aspectRatio : 1
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        thumbLayer.contentsGravity = useFit ? .resizeAspect : .resizeAspectFill
+        borderLayer.frame = fitImageRect()
+        CATransaction.commit()
+        overlayView.fitRect = useFit ? fitImageRect() : nil
 
         if idChanged {
             loadTask?.cancel()
             loadTask = nil
-            setThumbnail(nil, asset: asset, isFocused: isFocused, isCellSelected: isCellSelected)
-        } else {
-            updateOverlays(isFocused: isFocused, isCellSelected: isCellSelected)
+            thumbLayer.contents = nil
         }
 
+        updateBorder(isFocused: isFocused, isSelected: isCellSelected)
+        overlayView.update(isVideo: asset.mediaType == .video, isFocused: isFocused, isSelected: isCellSelected)
+
         if let img = ThumbnailCache.shared.cachedImage(for: asset.id) {
-            setThumbnail(img, asset: asset, isFocused: isFocused, isCellSelected: isCellSelected)
+            thumbLayer.contents = img
             return
         }
 
@@ -664,7 +889,7 @@ final class PhotoCell: NSCollectionViewItem {
             guard !Task.isCancelled, let self, self.configuredID == id else { return }
             await MainActor.run {
                 guard self.configuredID == id else { return }
-                self.setThumbnail(img, asset: asset, isFocused: self.isFocused, isCellSelected: self.isCellSelected)
+                self.thumbLayer.contents = img
             }
         }
     }
@@ -675,29 +900,96 @@ final class PhotoCell: NSCollectionViewItem {
         configuredID = nil
         isFocused = false
         isCellSelected = false
-        hosting?.rootView = ThumbnailView(asset: .placeholder, thumbnail: nil, isFocused: false, isSelected: false)
+        useFit = false
+        assetAspectRatio = 1
+        thumbLayer.contents = nil
+        thumbLayer.contentsGravity = .resizeAspectFill
+        borderLayer.borderWidth = 0
+        overlayView.fitRect = nil
+        overlayView.update(isVideo: false, isFocused: false, isSelected: false)
     }
 
-    private func setThumbnail(_ img: NSImage?, asset: PhotoAsset, isFocused: Bool, isCellSelected: Bool) {
-        let tv = ThumbnailView(asset: asset, thumbnail: img, isFocused: isFocused, isSelected: isCellSelected)
-        if let h = hosting {
-            h.rootView = tv
+    func updateOverlays(isFocused: Bool, isCellSelected: Bool) {
+        self.isFocused      = isFocused
+        self.isCellSelected = isCellSelected
+        updateBorder(isFocused: isFocused, isSelected: isCellSelected)
+        overlayView.update(isVideo: overlayView.isVideo, isFocused: isFocused, isSelected: isCellSelected)
+    }
+
+    private func updateBorder(isFocused: Bool, isSelected: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if isFocused || isSelected {
+            borderLayer.borderColor = NSColor.controlAccentColor.cgColor
+            borderLayer.borderWidth = 2.5
         } else {
-            let h = NSHostingView(rootView: tv)
-            h.sizingOptions = []
-            h.frame = view.bounds
-            h.autoresizingMask = [.width, .height]
-            view.addSubview(h)
-            hosting = h
+            borderLayer.borderWidth = 0
+        }
+        CATransaction.commit()
+    }
+}
+
+// MARK: - Cell Overlay
+
+final class CellOverlayView: NSView {
+    private(set) var isVideo = false
+    private var isFocused    = false
+    private var isSelected   = false
+    // nil = fill mode (full bounds); non-nil = fit mode image rect
+    var fitRect: CGRect? = nil { didSet { if fitRect != oldValue { needsDisplay = true } } }
+
+    func update(isVideo: Bool, isFocused: Bool, isSelected: Bool) {
+        guard self.isVideo != isVideo || self.isFocused != isFocused || self.isSelected != isSelected else { return }
+        self.isVideo    = isVideo
+        self.isFocused  = isFocused
+        self.isSelected = isSelected
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let b = fitRect ?? bounds
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+
+        if isSelected {
+            NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
+            NSBezierPath(roundedRect: b, xRadius: 3, yRadius: 3).fill()
+
+            let size: CGFloat = 18
+            let margin: CGFloat = 4
+            let cx = b.maxX - margin - size / 2
+            let cy = b.maxY - margin - size / 2
+            ctx.saveGState()
+            let circle = CGPath(ellipseIn: CGRect(x: cx - size/2, y: cy - size/2, width: size, height: size), transform: nil)
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.addPath(circle); ctx.fillPath()
+            ctx.setFillColor(accentColor.cgColor)
+            ctx.addPath(circle); ctx.fillPath()
+            ctx.restoreGState()
+            let attr: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: NSColor.white
+            ]
+            let str = NSAttributedString(string: "✓", attributes: attr)
+            let strSize = str.size()
+            str.draw(at: CGPoint(x: cx - strSize.width / 2, y: cy - strSize.height / 2))
+        }
+
+        if isVideo {
+            let attr: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 9),
+                .foregroundColor: NSColor.white
+            ]
+            let str = NSAttributedString(string: "▶", attributes: attr)
+            let strSize = str.size()
+            let padding: CGFloat = 5
+            let capsW = strSize.width + padding * 2
+            let capsH = strSize.height + 4
+            let capsRect = CGRect(x: b.minX + 4, y: b.minY + 4, width: capsW, height: capsH)
+            NSColor.black.withAlphaComponent(0.5).setFill()
+            NSBezierPath(roundedRect: capsRect, xRadius: capsH / 2, yRadius: capsH / 2).fill()
+            str.draw(at: CGPoint(x: capsRect.minX + padding, y: capsRect.minY + 2))
         }
     }
 
-    private func updateOverlays(isFocused: Bool, isCellSelected: Bool) {
-        guard var tv = hosting?.rootView else { return }
-        if tv.isFocused != isFocused || tv.isSelected != isCellSelected {
-            tv.isFocused  = isFocused
-            tv.isSelected = isCellSelected
-            hosting?.rootView = tv
-        }
-    }
+    private var accentColor: NSColor { .controlAccentColor }
 }
