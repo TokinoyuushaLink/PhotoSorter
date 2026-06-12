@@ -13,6 +13,22 @@ extension Notification.Name {
     static let confirmDeletePending          = Notification.Name("PhotoSorterConfirmDeletePending")
     static let sortedViewShouldDismiss       = Notification.Name("PhotoSorterSortedViewDismiss")
     static let assetsDidSort                 = Notification.Name("PhotoSorterAssetsDidSort")
+
+    // GlobalKeyMonitor raw events
+    // Number keys (object: NSNumber, value = 0–9):
+    static let keyDown         = Notification.Name("PhotoSorterKeyDown")
+    static let keyUp           = Notification.Name("PhotoSorterKeyUp")
+    static let keyLongPress    = Notification.Name("PhotoSorterKeyLongPress")
+    static let keyLongPressEnd = Notification.Name("PhotoSorterKeyLongPressEnd")
+    // Space key (object: SpaceKeyEvent):
+    static let spaceDown         = Notification.Name("PhotoSorterSpaceDown")
+    static let spaceUp           = Notification.Name("PhotoSorterSpaceUp")           // short press release
+    static let spaceLongPressEnd = Notification.Name("PhotoSorterSpaceLongPressEnd") // long press release
+}
+
+/// Payload for space-key notifications. sessionID ties a keyUp/keyLongPressEnd back to its keyDown.
+struct SpaceKeyEvent {
+    let sessionID: Int
 }
 
 enum Prefs {
@@ -74,7 +90,7 @@ func withoutAnimation(_ body: () -> Void) {
     var originX: CGFloat = 0
     var originY: CGFloat = 0
     var scrollOffset: CGFloat = 0
-    // Set by PhotoCollectionView coordinator; call to instantly scroll a flat index into view
+    // Set by PhotoCollectionView coordinator once makeNSView runs
     var scrollToVisible: ((Int) -> Void)?
 
     func frameFor(index: Int) -> CGRect {
@@ -184,9 +200,10 @@ enum Anim {
     static let multiHintFade:      TimeInterval = 0.4   // multi-queue hint fade
 
     // Collection animations
-    static let batchUpdateDuration: TimeInterval = 0.28  // NSCollectionView batch delete/insert
-    static let dragSettleDuration:  TimeInterval = 0.2   // strip drag reorder cell slide
-    static let dragCommitDuration:  TimeInterval = 0.15  // strip drag commit snap-back
+    static let batchUpdateDuration:   TimeInterval = 0.28  // NSCollectionView batch delete/insert
+    static let dragSettleDuration:    TimeInterval = 0.2   // strip drag reorder cell slide
+    static let dragCommitDuration:    TimeInterval = 0.15  // strip drag commit snap-back
+    static let stripLongPressDelay:   TimeInterval = 0.4   // number key held → strip highlight
 
     // Column browser highlight
     static let columnHighlightDelay:  TimeInterval = 0.13  // show highlight after assign

@@ -25,6 +25,7 @@ private final class ChipCell: NSCollectionViewItem {
     private let label = NSTextField(labelWithString: "")
     private let keyLabel = NSTextField(labelWithString: "")
     private let bg = NSVisualEffectView()
+    private let highlightLayer = CALayer()
 
     override func loadView() {
         view = NSView()
@@ -35,9 +36,12 @@ private final class ChipCell: NSCollectionViewItem {
         bg.blendingMode = .withinWindow
         bg.wantsLayer = true
         bg.layer?.cornerRadius = 5
-        bg.layer?.borderWidth = 1
         bg.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bg)
+
+        highlightLayer.cornerRadius = 5
+        highlightLayer.backgroundColor = NSColor.clear.cgColor
+        bg.layer?.addSublayer(highlightLayer)
 
         keyLabel.font = .monospacedSystemFont(ofSize: Layout.chipKeyLabelSize, weight: .medium)
         keyLabel.textColor = NSColor.secondaryLabelColor
@@ -67,6 +71,14 @@ private final class ChipCell: NSCollectionViewItem {
         ])
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        highlightLayer.frame = bg.layer?.bounds ?? .zero
+        CATransaction.commit()
+    }
+
     func configure(node: AlbumNode, index: Int) {
         label.stringValue = node.title
         if index < 10 {
@@ -75,16 +87,21 @@ private final class ChipCell: NSCollectionViewItem {
         } else {
             keyLabel.isHidden = true
         }
-        bg.layer?.borderColor = Self.chipBorderColor
     }
 
-    private static let chipBorderColor         = NSColor.white.withAlphaComponent(0.12).cgColor
-    private static let chipBorderColorSelected = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
-
     override var isSelected: Bool {
-        didSet {
-            bg.layer?.borderColor = isSelected ? Self.chipBorderColorSelected : Self.chipBorderColor
-        }
+        didSet { applyHighlight() }
+    }
+
+    private func applyHighlight() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        highlightLayer.backgroundColor = isSelected
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.clear.cgColor
+        CATransaction.commit()
+        label.textColor    = isSelected ? .white : .labelColor
+        keyLabel.textColor = isSelected ? NSColor.white.withAlphaComponent(0.75) : .secondaryLabelColor
     }
 }
 
@@ -110,6 +127,18 @@ private final class FavoriteCollectionView: NSView,
             guard nodes.map(\.id) != oldValue.map(\.id) else { return }
             displayNodes = nodes
             collectionView.reloadData()
+        }
+    }
+    var pressedIndex: Int? = nil {
+        didSet {
+            guard pressedIndex != oldValue else { return }
+            // 更新旧值和新值对应的 cell 高亮状态
+            for idx in [oldValue, pressedIndex].compactMap({ $0 }) {
+                guard displayNodes.indices.contains(idx) else { continue }
+                if let cell = collectionView.item(at: IndexPath(item: idx, section: 0)) as? ChipCell {
+                    cell.isSelected = (idx == pressedIndex)
+                }
+            }
         }
     }
     var onAssign: ((AlbumNode) -> Void)?
@@ -444,6 +473,7 @@ private struct FavoriteStripView: NSViewRepresentable {
     let nodes: [AlbumNode]
     let onAssign: (AlbumNode) -> Void
     let onReorder: (Int, Int) -> Void
+    var pressedIndex: Int? = nil
 
     func makeNSView(context: Context) -> FavoriteCollectionView {
         let v = FavoriteCollectionView(frame: .zero)
@@ -456,6 +486,7 @@ private struct FavoriteStripView: NSViewRepresentable {
         nsView.nodes = nodes
         nsView.onAssign = onAssign
         nsView.onReorder = onReorder
+        nsView.pressedIndex = pressedIndex
     }
 }
 
@@ -470,6 +501,8 @@ struct AlbumStripCombined: View {
     var autoHideInSingleMode: Bool = true
     /// 浅色模式下底部渐变过半时由调用方置 true，强制文字用白色
     var forceLightText: Bool = false
+    /// 当前长按高亮的收藏索引（由外部键盘监测驱动）
+    var pressedIndex: Int? = nil
 
     @State private var isHovered = false
 
@@ -515,7 +548,8 @@ struct AlbumStripCombined: View {
                 FavoriteStripView(
                     nodes: favoriteNodes,
                     onAssign: onAssign,
-                    onReorder: onReorderFavorites
+                    onReorder: onReorderFavorites,
+                    pressedIndex: pressedIndex
                 )
             }
         }

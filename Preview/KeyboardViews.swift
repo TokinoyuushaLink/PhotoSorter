@@ -5,7 +5,143 @@ import AppKit
 
 enum CapturedKey { case space, left, right, info, selectAll, playPause }
 
-// MARK: - Grid Key Handler (first-responder based, space key only)
+// MARK: - Global Key Monitor
+//
+// Pure event emitter — no routing logic here.
+//
+// Number keys (object: NSNumber, value = 0–9):
+//   .keyDown         — first press
+//   .keyUp           — short-press release
+//   .keyLongPress    — held past Anim.stripLongPressDelay
+//   .keyLongPressEnd — long-press release
+//
+// Space key (object: SpaceKeyEvent with sessionID):
+//   .spaceDown         — first press; sessionID increments each press
+//   .spaceUp           — short-press release (sessionID matches its .spaceDown)
+//   .spaceLongPressEnd — long-press release  (sessionID matches its .spaceDown)
+
+struct GlobalKeyMonitor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install()
+        return NSView()
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        private var downMonitor: Any?
+        private var upMonitor: Any?
+
+        // Space session
+        private var spaceSessionID = 0
+        private var spaceTimer: Timer?
+        private var spaceDidLongPress = false
+
+        // Number key long-press state
+        private var longPressTimer: Timer?
+        private var activeKey: Int? = nil
+        private var didFireLongPress = false
+
+        private static let numKeyMap: [UInt16: Int] = [
+            18: 0, 19: 1, 20: 2, 21: 3, 23: 4,
+            22: 5, 26: 6, 28: 7, 25: 8, 29: 9
+        ]
+
+        func install() {
+            downMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                self?.handleDown(event) ?? event
+            }
+            upMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+                self?.handleUp(event) ?? event
+            }
+        }
+
+        func uninstall() {
+            if let m = downMonitor { NSEvent.removeMonitor(m); downMonitor = nil }
+            if let m = upMonitor   { NSEvent.removeMonitor(m); upMonitor   = nil }
+            spaceTimer?.invalidate(); spaceTimer = nil
+            cancelTimer()
+        }
+
+        private func handleDown(_ event: NSEvent) -> NSEvent? {
+            if event.keyCode == 49 {
+                if !event.isARepeat {
+                    spaceSessionID += 1
+                    spaceDidLongPress = false
+                    let sid = spaceSessionID
+                    postSpace(.spaceDown, sessionID: sid)
+                    spaceTimer?.invalidate()
+                    spaceTimer = Timer.scheduledTimer(
+                        withTimeInterval: Anim.stripLongPressDelay, repeats: false
+                    ) { [weak self] _ in
+                        guard let self, self.spaceSessionID == sid else { return }
+                        self.spaceDidLongPress = true
+                    }
+                }
+                return nil
+            }
+            if let key = Self.numKeyMap[event.keyCode], !event.isARepeat {
+                activeKey = key
+                didFireLongPress = false
+                post(.keyDown, key: key)
+                longPressTimer?.invalidate()
+                longPressTimer = Timer.scheduledTimer(
+                    withTimeInterval: Anim.stripLongPressDelay, repeats: false
+                ) { [weak self] _ in
+                    guard let self, self.activeKey == key else { return }
+                    self.didFireLongPress = true
+                    self.post(.keyLongPress, key: key)
+                }
+                return nil
+            }
+            return event
+        }
+
+        private func handleUp(_ event: NSEvent) -> NSEvent? {
+            if event.keyCode == 49 {
+                spaceTimer?.invalidate(); spaceTimer = nil
+                let sid = spaceSessionID
+                if spaceDidLongPress {
+                    postSpace(.spaceLongPressEnd, sessionID: sid)
+                } else {
+                    postSpace(.spaceUp, sessionID: sid)
+                }
+                spaceDidLongPress = false
+                return nil
+            }
+            if let key = Self.numKeyMap[event.keyCode], activeKey == key {
+                cancelTimer()
+                if didFireLongPress {
+                    post(.keyLongPressEnd, key: key)
+                } else {
+                    post(.keyUp, key: key)
+                }
+                activeKey = nil
+                didFireLongPress = false
+                return nil
+            }
+            return event
+        }
+
+        private func cancelTimer() {
+            longPressTimer?.invalidate()
+            longPressTimer = nil
+        }
+
+        private func post(_ name: Notification.Name, key: Int) {
+            NotificationCenter.default.post(name: name, object: NSNumber(value: key))
+        }
+
+        private func postSpace(_ name: Notification.Name, sessionID: Int) {
+            NotificationCenter.default.post(name: name, object: SpaceKeyEvent(sessionID: sessionID))
+        }
+    }
+}
+
+// MARK: - Grid Key Handler (first-responder based)
 
 struct KeyEventView: NSViewRepresentable {
     let onKey: (CapturedKey) -> Void
@@ -23,15 +159,13 @@ struct KeyEventView: NSViewRepresentable {
 
 struct KeyMonitorView: NSViewRepresentable {
     let onKey: (CapturedKey) -> Void
-    var onShortcut: ((Int) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSView {
-        context.coordinator.start(onKey: onKey, onShortcut: onShortcut)
+        context.coordinator.start(onKey: onKey)
         return NSView()
     }
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onKey = onKey
-        context.coordinator.onShortcut = onShortcut
     }
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.stop()
@@ -40,91 +174,22 @@ struct KeyMonitorView: NSViewRepresentable {
 
     final class Coordinator {
         var onKey: ((CapturedKey) -> Void)?
-        var onShortcut: ((Int) -> Void)?
         private var monitor: Any?
 
-        private static let numKeyMap: [UInt16: Int] = [
-            18: 0, 19: 1, 20: 2, 21: 3, 23: 4,
-            22: 5, 26: 6, 28: 7, 25: 8, 29: 9
-        ]
-
-        func start(onKey: @escaping (CapturedKey) -> Void, onShortcut: ((Int) -> Void)?) {
+        func start(onKey: @escaping (CapturedKey) -> Void) {
             self.onKey = onKey
-            self.onShortcut = onShortcut
+            // Space is handled via GlobalKeyMonitor → .keyUp(-1) notification.
+            // KeyMonitorView only handles navigation/info/playPause keys here.
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self else { return event }
                 let opt = event.modifierFlags.contains(.option)
                 switch event.keyCode {
                 case 49 where opt:  self.onKey?(.playPause); return nil
-                case 49:            self.onKey?(.space);     return nil
                 case 123: self.onKey?(.left);   return nil
                 case 124: self.onKey?(.right);  return nil
                 case 34:  self.onKey?(.info);   return nil
-                default:
-                    if !event.isARepeat, let idx = Self.numKeyMap[event.keyCode], self.onShortcut != nil {
-                        DispatchQueue.main.async { self.onShortcut?(idx) }
-                        return nil
-                    }
-                    return event
+                default:  return event
                 }
-            }
-        }
-
-        func stop() {
-            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
-        }
-    }
-}
-
-// MARK: - First-Responder NSView
-
-// MARK: - Number Shortcut Monitor (1–0 → favorite album indices 0–9)
-
-struct NumberShortcutMonitor: NSViewRepresentable {
-    let enabled: Bool
-    let onShortcut: (Int) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let v = ShortcutView()
-        v.enabled = enabled
-        v.onShortcut = onShortcut
-        return v
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        guard let v = nsView as? ShortcutView else { return }
-        v.enabled = enabled
-        v.onShortcut = onShortcut
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
-        (nsView as? ShortcutView)?.stop()
-    }
-
-    class ShortcutView: NSView {
-        var enabled = true
-        var onShortcut: ((Int) -> Void)?
-        private var monitor: Any?
-
-        private static let keyMap: [UInt16: Int] = [
-            18: 0, 19: 1, 20: 2, 21: 3, 23: 4,
-            22: 5, 26: 6, 28: 7, 25: 8, 29: 9
-        ]
-
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window != nil { start() } else { stop() }
-        }
-
-        private func start() {
-            guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, self.enabled, !event.isARepeat,
-                      let idx = Self.keyMap[event.keyCode] else { return event }
-                DispatchQueue.main.async { self.onShortcut?(idx) }
-                return nil
             }
         }
 
@@ -141,10 +206,9 @@ struct UndoRedoMonitor: NSViewRepresentable {
     let canRedo: Bool
     let onUndo: () -> Void
     let onRedo: () -> Void
-    // Delete key handlers (optional; nil = not handled)
-    var onDelete: (() -> Void)? = nil           // Delete key (plain)
-    var onCmdDelete: (() -> Void)? = nil        // Cmd+Delete
-    var onToggleSidebar: (() -> Void)? = nil    // Cmd+\
+    var onDelete: (() -> Void)? = nil
+    var onCmdDelete: (() -> Void)? = nil
+    var onToggleSidebar: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSView {
         let v = UndoRedoView()
@@ -194,20 +258,20 @@ struct UndoRedoMonitor: NSViewRepresentable {
                 guard let self else { return event }
                 let cmd = event.modifierFlags.contains(.command)
                 switch event.keyCode {
-                case 6 where cmd:   // Cmd+Z / Cmd+Shift+Z
+                case 6 where cmd:
                     if event.modifierFlags.contains(.shift) {
                         if self.canRedo { DispatchQueue.main.async { self.onRedo?() }; return nil }
                     } else {
                         if self.canUndo { DispatchQueue.main.async { self.onUndo?() }; return nil }
                     }
                     return event
-                case 51 where cmd:  // Cmd+Delete (keyCode 51 = Delete/Backspace)
+                case 51 where cmd:
                     if let h = self.onCmdDelete { DispatchQueue.main.async { h() }; return nil }
                     return event
-                case 51 where !cmd: // plain Delete
+                case 51 where !cmd:
                     if let h = self.onDelete { DispatchQueue.main.async { h() }; return nil }
                     return event
-                case 42 where cmd:  // Cmd+\ — toggle sidebar (keyCode 42 = backslash)
+                case 42 where cmd:
                     if let h = self.onToggleSidebar { DispatchQueue.main.async { h() }; return nil }
                     return event
                 default:
@@ -266,7 +330,8 @@ class KeyCaptureView: NSView {
         case 123: onKey?(.left)
         case 124: onKey?(.right)
         case 34:  onKey?(.info)
-        case 0 where cmd: onKey?(.selectAll)   // ⌘A
+        case 0 where cmd: onKey?(.selectAll)
+        case 18, 19, 20, 21, 23, 22, 26, 28, 25, 29: break  // number keys: handled by GlobalKeyMonitor
         default:  super.keyDown(with: event)
         }
     }

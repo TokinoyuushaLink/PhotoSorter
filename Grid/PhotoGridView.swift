@@ -13,12 +13,9 @@ struct PhotoGridView: View {
     var topPadding: CGFloat = 0
     var bottomPadding: CGFloat = 0
     var useThumbnailFit: Bool = false
-    var sections: [SectionData]? = nil     // nil = uncategorized mode (uses store.assets)
+    var sections: [SectionData]? = nil
     var externalSelectedIDs: Binding<Set<String>>? = nil
-    var onSelectAll: (() -> Void)? = nil   // called by Cmd+A in section mode
-    var onFrameProviderReady: ((@escaping (Int) -> CGRect) -> Void)?
-
-    @State private var frameProvider: ((Int) -> CGRect)?
+    var onSelectAll: (() -> Void)? = nil
 
     private var isEmpty: Bool {
         sections.map { $0.allSatisfy { $0.assets.isEmpty } } ?? store.assets.isEmpty
@@ -48,10 +45,6 @@ struct PhotoGridView: View {
 
             } else {
                 GeometryReader { geo in
-                    let spacing: CGFloat = 2
-                    let cols = max(2, Int(geo.size.width / Layout.gridMinCellWidth))
-                    let cellSize = (geo.size.width - spacing * CGFloat(cols - 1)) / CGFloat(cols)
-
                     PhotoCollectionView(
                         store: store,
                         focusedID: $focusedID,
@@ -67,11 +60,7 @@ struct PhotoGridView: View {
                             let threshold: CGFloat = 48
                             topGradientOpacity    = min(1, max(0, offsetY / threshold))
                             bottomGradientOpacity = min(1, max(0, (contentH - containerH - offsetY) / threshold))
-                        },
-                        onFrameProviderReady: { provider in
-                            frameProvider = provider
-                            onFrameProviderReady?(provider)
-                        },
+                        }
                     )
                     .onChange(of: geo.size, initial: true) { _, _ in
                         rebuildLayout(geo: geo)
@@ -82,28 +71,6 @@ struct PhotoGridView: View {
                     .background(
                         KeyEventView { key in
                             switch key {
-                            case .space:
-                                if let id = focusedID {
-                                    // Find flat index across all sections (or store.assets)
-                                    let flatIdx: Int?
-                                    if let secs = sections {
-                                        var off = 0
-                                        var found: Int? = nil
-                                        for sec in secs {
-                                            if let i = sec.assets.firstIndex(where: { $0.id == id }) {
-                                                found = off + i; break
-                                            }
-                                            off += sec.assets.count
-                                        }
-                                        flatIdx = found
-                                    } else {
-                                        flatIdx = store.assets.firstIndex(where: { $0.id == id })
-                                    }
-                                    if let idx = flatIdx {
-                                        focusedFrame = frameProvider?(idx) ?? gridLayout.frameFor(index: idx)
-                                    }
-                                }
-                                onOpenPreview()
                             case .selectAll:
                                 if let onSelectAll { onSelectAll() } else { store.selectAll() }
                             default:

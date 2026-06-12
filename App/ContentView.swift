@@ -39,9 +39,10 @@ struct ContentView: View {
     @State private var largeTitleTextOpacity: Double = 1
     @State private var topHintText: String? = nil
     @State private var topHintTask: Task<Void, Never>? = nil
-    private let gridLayout = GridLayout()
-    // Live AppKit-based frame provider; set once PhotoCollectionView coordinator is ready
-    @State private var gridFrameProvider: ((Int) -> CGRect)?
+    @State private var gridLayout = GridLayout()
+    @State private var stripPressedIndex: Int? = nil
+    // sessionID of the spaceDown that triggered the current single-mode entry
+    @State private var spaceEnterSessionID: Int? = nil
 
     private let topGradientH  = Layout.topGradientHeight
     private let stripH        = Layout.stripHeight
@@ -77,7 +78,8 @@ struct ContentView: View {
 
     // 底部渐变过半时，浅色模式下收藏条文字切到白色
     private var bottomLabelIsWhite: Bool {
-        colorScheme == .dark || bottomGradientOpacity > 0.5
+        let hasPhotos = !photosStore.assets.isEmpty || totalSortedAndDeleteCount > 0
+        return hasPhotos && (colorScheme == .dark || bottomGradientOpacity > 0.5)
     }
 
     // 大标题：随顶部渐变 0→0.5 段淡出；multiQueueHint 时强制隐藏（提示走小标题行）
@@ -110,8 +112,7 @@ struct ContentView: View {
                 externalSelectedIDs: showSortedView ? $sortedSelectedIDs : nil,
                 onSelectAll: showSortedView ? {
                     sortedSelectedIDs = Set(sortedSections.flatMap { $0.assets.map(\.id) })
-                } : nil,
-                onFrameProviderReady: { provider in gridFrameProvider = provider }
+                } : nil
             )
             .padding(.trailing, panelTotalWidth)
 
@@ -175,7 +176,8 @@ struct ContentView: View {
                     onReorderFavorites: albumsStore.reorderFavorites,
                     isInSingleMode: showingPreview,
                     autoHideInSingleMode: autoHideStrip,
-                    forceLightText: bottomLabelIsWhite
+                    forceLightText: bottomLabelIsWhite,
+                    pressedIndex: stripPressedIndex
                 )
             }
             .padding(.trailing, panelTotalWidth)
@@ -242,12 +244,8 @@ struct ContentView: View {
             // 层 7：全局反馈层
             if needsPermission { permissionOverlay }
 
-            NumberShortcutMonitor(enabled: !isInSingleMode) { idx in
-                let nodes = albumsStore.favoriteNodes
-                guard nodes.indices.contains(idx) else { return }
-                assignToAlbum(nodes[idx])
-            }
-            .allowsHitTesting(false)
+            GlobalKeyMonitor()
+                .allowsHitTesting(false)
 
             UndoRedoMonitor(
                 canUndo: sortHistory.canUndo,
@@ -308,6 +306,36 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .thumbnailFitToggled)) { note in
             if let val = note.object as? Bool { thumbnailFit = val }
+        }
+        // Space down: enter single mode, record sessionID so SinglePhotoView can ignore this release.
+        .onReceive(NotificationCenter.default.publisher(for: .spaceDown)) { note in
+            guard let ev = note.object as? SpaceKeyEvent else { return }
+            guard !isInSingleMode else { return }
+            spaceEnterSessionID = ev.sessionID
+            enterSingleMode()
+        }
+        // Number key up (short press only) → assign
+        .onReceive(NotificationCenter.default.publisher(for: .keyUp)) { note in
+            guard let key = (note.object as? NSNumber)?.intValue, key >= 0 else { return }
+            let nodes = albumsStore.favoriteNodes
+            guard nodes.indices.contains(key) else { return }
+            assignToAlbum(nodes[key])
+            stripPressedIndex = key
+            DispatchQueue.main.asyncAfter(deadline: .now() + Anim.columnHighlightDelay + Anim.columnClearDelay) {
+                if stripPressedIndex == key { stripPressedIndex = nil }
+            }
+        }
+        // Number key long-press start → show strip highlight
+        .onReceive(NotificationCenter.default.publisher(for: .keyLongPress)) { note in
+            guard let key = (note.object as? NSNumber)?.intValue, key >= 0 else { return }
+            stripPressedIndex = key
+        }
+        // Number key long-press end → clear highlight (no assign)
+        .onReceive(NotificationCenter.default.publisher(for: .keyLongPressEnd)) { note in
+            guard let key = (note.object as? NSNumber)?.intValue, key >= 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Anim.columnClearDelay) {
+                if stripPressedIndex == key { stripPressedIndex = nil }
+            }
         }
         // Quit alert: pending deletes exist → block and warn user to delete first
         .alert("还有待删除的照片", isPresented: $showQuitConfirm) {
@@ -600,7 +628,7 @@ struct ContentView: View {
             getGridFrame: { localIdx in
                 let id = localIdx < singleModeAssets.count ? singleModeAssets[localIdx].id : nil
                 guard let eid = id else {
-                    return gridFrameProvider?(localIdx) ?? gridLayout.frameFor(index: localIdx)
+                    return gridLayout.frameFor(index: localIdx)
                 }
                 let flatIdx: Int?
                 if showSortedView {
@@ -617,7 +645,7 @@ struct ContentView: View {
                 } else {
                     flatIdx = photosStore.assets.firstIndex(where: { $0.id == eid })
                 }
-                return gridFrameProvider?(flatIdx ?? localIdx) ?? gridLayout.frameFor(index: flatIdx ?? localIdx)
+                return gridLayout.frameFor(index: flatIdx ?? localIdx)
             },
             onIndexChange: { singleModeCurrentIndex = $0 },
             onDismissBegin: { showingPreview = false },
@@ -651,11 +679,7 @@ struct ContentView: View {
                 pendingDismissWork = work
                 DispatchQueue.main.async(execute: work)
             },
-            onShortcut: { idx in
-                let nodes = albumsStore.favoriteNodes
-                guard nodes.indices.contains(idx) else { return }
-                assignToAlbum(nodes[idx])
-            },
+            spaceEnterSessionID: spaceEnterSessionID,
             panelWidth: panelTotalWidth,
             swipeExcludeBottom: stripH,
             swipeExcludeRight: panelTotalWidth,
@@ -675,6 +699,26 @@ struct ContentView: View {
             return
         }
         guard let id = focusedID else { return }
+
+        // Refresh focusedFrame from layout math before entering, so the entry animation
+        // always starts from the correct cell position regardless of scroll state.
+        if showSortedView {
+            let secs = sortedSections
+            var off = 0
+            for sec in secs {
+                if let i = sec.assets.firstIndex(where: { $0.id == id }) {
+                    let frame = gridLayout.frameFor(index: off + i)
+                    if frame != .zero { focusedFrame = frame }
+                    break
+                }
+                off += sec.assets.count
+            }
+        } else {
+            if let idx = photosStore.assets.firstIndex(where: { $0.id == id }) {
+                let frame = gridLayout.frameFor(index: idx)
+                if frame != .zero { focusedFrame = frame }
+            }
+        }
 
         if showSortedView {
             // 已分类模式：多选 → 选中集队列；单选/无选 → 所在分组（含待删除组）作为队列

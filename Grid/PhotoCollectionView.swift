@@ -24,7 +24,6 @@ struct PhotoCollectionView: NSViewRepresentable {
     // When non-nil, section-mode tap/selection operates on this set instead of store.selectedIDs
     var externalSelectedIDs: Binding<Set<String>>?
     let onScrollChange: (_ offsetY: CGFloat, _ contentH: CGFloat, _ containerH: CGFloat) -> Void
-    var onFrameProviderReady: ((_ provider: @escaping (Int) -> CGRect) -> Void)?
 
     private static let headerID = NSUserInterfaceItemIdentifier("SectionHeader")
 
@@ -51,8 +50,9 @@ struct PhotoCollectionView: NSViewRepresentable {
             c?.handleTap(indexPath: ip, isCommand: isCmd, isShift: isShift)
         }
         cv.onTapBackground = { [weak c] in c?.handleBackgroundTap() }
-        cv.onWidthWillChange = { [weak c] in c?.captureResizeAnchor() }
+        cv.onWidthWillChange = { [weak c] in c?.captureResizeAnchorIfNeeded() }
         cv.onWidthDidChange  = { [weak c] in c?.applyResizeAnchor() }
+        cv.onResizeEnd       = { [weak c] in c?.clearResizeAnchor() }
 
         let sv = NSScrollView()
         sv.documentView = cv
@@ -66,7 +66,6 @@ struct PhotoCollectionView: NSViewRepresentable {
         c.sv = sv
         c.observeScroll(sv)
 
-        onFrameProviderReady?({ [weak c] index in c?.swiftUIFrame(forFlatIndex: index) ?? .zero })
         gridLayout.scrollToVisible = { [weak c] index in c?.scrollToVisible(flatIndex: index) }
 
         DispatchQueue.main.async { [weak c] in c?.reportScroll() }
@@ -132,6 +131,9 @@ struct PhotoCollectionView: NSViewRepresentable {
         }
 
         if needsReload {
+            // Data changed — the anchor flat index may now point to a different or deleted item.
+            // Clear it so the next resize captures a fresh anchor from the current scroll position.
+            c.clearResizeAnchor()
             let newSectionData = newSections ?? [SectionData(header: nil, assets: store.assets)]
             let oldSectionData = c.cachedSections
 
@@ -218,9 +220,11 @@ struct PhotoCollectionView: NSViewRepresentable {
         // Committed snapshot used as the data source — kept in sync before batch updates
         var cachedSections: [SectionData] = []
         private var scrollObs: Any?
-        // Flat item index of the first item in the anchor row (stable across column-count changes)
+        // Flat item index of the first item in the anchor row
         private var resizeAnchorFlatItem: Int? = nil
-        // How far the anchor row's center was from the viewport top (content-space delta)
+        // When true, the captured offsetY is restored verbatim after resize
+        private var resizeAnchorUseTop: Bool = false
+        // In top mode: the raw offsetY at capture time. In center mode: anchor row center offset relative to viewport center.
         private var resizeAnchorViewportDelta: CGFloat = 0
 
         init(_ parent: PhotoCollectionView) { self.parent = parent }
@@ -276,8 +280,20 @@ struct PhotoCollectionView: NSViewRepresentable {
             ) { [weak self] _ in self?.reportScroll() }
         }
 
-        // Called before resize: record which item is at the viewport center row.
-        func captureResizeAnchor() {
+        // Called once at the start of a resize; ignored if anchor already locked.
+        func captureResizeAnchorIfNeeded() {
+            guard resizeAnchorFlatItem == nil else { return }
+            captureResizeAnchor()
+        }
+
+        func clearResizeAnchor() {
+            resizeAnchorFlatItem = nil
+        }
+
+        // Called before resize: record which item is at the anchor row.
+        // Near the top of the list, the top row is used as anchor (delta from viewport top).
+        // Otherwise, the center row is used (delta from viewport center).
+        private func captureResizeAnchor() {
             guard let sv, let cv,
                   let layout = cv.collectionViewLayout as? SquareGridLayout,
                   layout.side > 0, layout.cols > 0 else {
@@ -286,11 +302,14 @@ struct PhotoCollectionView: NSViewRepresentable {
             }
             let offsetY   = sv.documentVisibleRect.origin.y
             let viewportH = sv.bounds.height
-            let centerY   = offsetY + viewportH / 2
+            let step      = layout.side + layout.spacing
 
-            let sp   = layout.spacing
-            let step = layout.side + sp
-            let secs = currentSections()
+            // Use top-row anchor when the grid is scrolled near the top (within one row height).
+            // This prevents a gap appearing above the first row after resize.
+            let useTop = offsetY < step
+            let refY   = useTop ? offsetY : offsetY + viewportH / 2
+
+            let secs  = currentSections()
             let infos = layout.sectionInfosSnapshot()
 
             var flatOffset = 0
@@ -302,11 +321,11 @@ struct PhotoCollectionView: NSViewRepresentable {
                 guard count > 0 else { continue }
                 let cols = layout.cols
                 let rows = (count + cols - 1) / cols
-                let sectionBottom = info.itemsOriginY + CGFloat(rows) * step - sp
+                let sectionBottom = info.itemsOriginY + CGFloat(rows) * step - layout.spacing
 
-                if centerY <= sectionBottom || s == infos.count - 1 {
-                    let rowInSec  = max(0, min(Int((centerY - info.itemsOriginY) / step), rows - 1))
-                    let firstItem = rowInSec * cols       // first item index within this section
+                if refY <= sectionBottom || s == infos.count - 1 {
+                    let rowInSec  = max(0, min(Int((refY - info.itemsOriginY) / step), rows - 1))
+                    let firstItem = rowInSec * cols
                     anchorFlat       = flatOffset + min(firstItem, count - 1)
                     anchorRowCenterY = info.itemsOriginY + CGFloat(rowInSec) * step + layout.side / 2
                     break
@@ -315,9 +334,13 @@ struct PhotoCollectionView: NSViewRepresentable {
             }
 
             if let flat = anchorFlat {
-                resizeAnchorFlatItem      = flat
-                // How far the row center sits below the viewport top — preserved after resize
-                resizeAnchorViewportDelta = anchorRowCenterY - offsetY
+                resizeAnchorFlatItem  = flat
+                resizeAnchorUseTop    = useTop
+                // Top mode: store raw offsetY — restored verbatim after resize.
+                // Center mode: store anchor row center offset relative to viewport center.
+                resizeAnchorViewportDelta = useTop
+                    ? offsetY
+                    : anchorRowCenterY - (offsetY + viewportH / 2)
             } else {
                 resizeAnchorFlatItem = nil
             }
@@ -333,31 +356,34 @@ struct PhotoCollectionView: NSViewRepresentable {
                 return
             }
 
-            // Ensure layout has finished recalculating for the new width
             cv.layoutSubtreeIfNeeded()
 
             guard layout.side > 0, layout.cols > 0 else { reportScroll(); return }
 
-            // Find the IndexPath for anchorFlat in the new layout
             let secs = currentSections()
             guard let ip = flatIndexToIndexPath(anchorFlat, secs: secs) else {
                 reportScroll(); return
             }
 
-            // Use the layout's row geometry directly (more reliable than layoutAttributesForItem
-            // when called right after an invalidation)
             let infos = layout.sectionInfosSnapshot()
             guard ip.section < infos.count else { reportScroll(); return }
-            let info  = infos[ip.section]
-            let cols  = layout.cols
-            let row   = ip.item / cols
-            let sp    = layout.spacing
-            let newRowCenterY = info.itemsOriginY + CGFloat(row) * (layout.side + sp) + layout.side / 2
 
-            let newOffsetY  = newRowCenterY - resizeAnchorViewportDelta
-            let contentH    = layout.collectionViewContentSize.height
-            let viewportH   = sv.bounds.height
-            let clamped     = max(0, min(newOffsetY, contentH - viewportH))
+            let info = infos[ip.section]
+            let sp   = layout.spacing
+            let step = layout.side + sp
+            // Anchor item's row in the new layout (cols may differ from capture time)
+            let newRow        = ip.item / layout.cols
+            let newRowCenterY = info.itemsOriginY + CGFloat(newRow) * step + layout.side / 2
+
+            let viewportH  = sv.bounds.height
+            let contentH   = layout.collectionViewContentSize.height
+            // Restore anchor row to the same position relative to the captured reference point
+            let newOffsetY = resizeAnchorUseTop
+                ? resizeAnchorViewportDelta   // restore raw offsetY verbatim; may be negative (rubber-band top)
+                : newRowCenterY - resizeAnchorViewportDelta - viewportH / 2
+            // Top mode allows negative offsetY (elastic top overscroll); center mode clamps to [0, max].
+            let minOffset  = resizeAnchorUseTop ? newOffsetY : 0
+            let clamped    = max(minOffset, min(newOffsetY, contentH - viewportH))
 
             sv.contentView.scroll(to: NSPoint(x: 0, y: clamped))
             sv.reflectScrolledClipView(sv.contentView)
@@ -387,13 +413,9 @@ struct PhotoCollectionView: NSViewRepresentable {
         /// (between the top and bottom gradient zones). Meant to be called synchronously before
         /// a dismiss animation begins, so the animation target lands inside the viewport.
         func scrollToVisible(flatIndex flat: Int) {
-            NSLog("[scrollToVisible] flat=%d sv=%@ cv=%@", flat, sv != nil ? "SET" : "NIL", cv != nil ? "SET" : "NIL")
             guard let sv, let cv,
                   let ip = indexPath(forFlatIndex: flat),
                   let attrs = cv.collectionViewLayout?.layoutAttributesForItem(at: ip) else {
-                NSLog("[scrollToVisible] guard failed ip=%@ attrs=%@",
-                      indexPath(forFlatIndex: flat) != nil ? "OK" : "NIL",
-                      "?")
                 return
             }
 
@@ -428,37 +450,15 @@ struct PhotoCollectionView: NSViewRepresentable {
             reportScroll()
         }
 
-        // MARK: Frame
-
-        func swiftUIFrame(forFlatIndex flat: Int) -> CGRect {
-            guard let ip = indexPath(forFlatIndex: flat) else { return .zero }
-            return swiftUIFrame(for: ip)
-        }
-
-        private func swiftUIFrame(for ip: IndexPath) -> CGRect {
-            guard let cv, let sv, let window = cv.window,
-                  let contentView = window.contentView,
-                  let attrs = cv.collectionViewLayout?.layoutAttributesForItem(at: ip) else { return .zero }
-            let scrollY = sv.documentVisibleRect.origin.y
-            let itemInCV = CGRect(
-                x: attrs.frame.origin.x,
-                y: attrs.frame.origin.y - scrollY,
-                width: attrs.frame.width,
-                height: attrs.frame.height
-            )
-            let itemInContent = cv.convert(itemInCV, to: contentView)
-            let swiftUIY = contentView.bounds.height - itemInContent.maxY
-            return CGRect(x: itemInContent.minX, y: swiftUIY,
-                          width: itemInContent.width, height: itemInContent.height)
-        }
-
         // MARK: Tap Handling
 
         func handleTap(indexPath ip: IndexPath, isCommand: Bool, isShift: Bool) {
             guard let asset = asset(at: ip) else { return }
 
+            let secs = currentSections()
+            let flatIndex = (0..<ip.section).reduce(0) { $0 + secs[$1].assets.count } + ip.item
             parent.focusedID    = asset.id
-            parent.focusedFrame = swiftUIFrame(for: ip)
+            parent.focusedFrame = parent.gridLayout.frameFor(index: flatIndex)
 
             if let ext = parent.externalSelectedIDs {
                 // Section mode: selection operates on external binding, range within same section
@@ -760,11 +760,13 @@ final class SquareGridLayout: NSCollectionViewLayout {
 final class TapCollectionView: NSCollectionView {
     var onTapItem: ((IndexPath, Bool, Bool) -> Void)?
     var onTapBackground: (() -> Void)?
-    var onWidthWillChange: (() -> Void)?    // called before width changes, layout still old
-    var onWidthDidChange: (() -> Void)?     // called after width changes and layout is invalidated
+    var onWidthWillChange: (() -> Void)?    // called once at resize start, before first width change
+    var onWidthDidChange: (() -> Void)?     // called every frame during resize, after layout invalidated
+    var onResizeEnd: (() -> Void)?          // called when width stabilises (debounced)
     // Authoritative width set synchronously in setFrameSize, before invalidateLayout fires.
     // cv.bounds.width may lag by one layout pass; reading this avoids the 5-10px desync.
     private(set) var currentWidth: CGFloat = 0
+    private var resizeEndTimer: Timer?
 
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = abs(newSize.width - currentWidth) > 0.5
@@ -772,7 +774,13 @@ final class TapCollectionView: NSCollectionView {
         currentWidth = newSize.width
         super.setFrameSize(newSize)
         collectionViewLayout?.invalidateLayout()
-        if widthChanged { onWidthDidChange?() }
+        if widthChanged {
+            onWidthDidChange?()
+            resizeEndTimer?.invalidate()
+            resizeEndTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+                self?.onResizeEnd?()
+            }
+        }
     }
 
     override func mouseDown(with event: NSEvent) {

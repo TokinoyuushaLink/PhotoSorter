@@ -15,10 +15,10 @@ struct SinglePhotoView: View {
     // Called with the flat grid index just before the dismiss animation; use to scroll grid into view
     var onBeforeDismiss: ((Int) -> Void)? = nil
     let onDismiss: (Int) -> Void
-    var onShortcut: ((Int) -> Void)? = nil
-    var panelWidth: CGFloat = 0          // right panel width; photo endRect stops at panel left edge
-    var swipeExcludeBottom: CGFloat = 0  // height excluded from swipe zone bottom (floating strip)
-    var swipeExcludeRight: CGFloat = 0   // width excluded from swipe zone right (floating panel)
+    var spaceEnterSessionID: Int? = nil  // sessionID of the spaceDown that triggered entry; dismiss ignores matching release
+    var panelWidth: CGFloat = 0
+    var swipeExcludeBottom: CGFloat = 0
+    var swipeExcludeRight: CGFloat = 0
     var useThumbnailFit: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
@@ -46,7 +46,7 @@ struct SinglePhotoView: View {
          onDismissBegin: @escaping () -> Void,
          onBeforeDismiss: ((Int) -> Void)? = nil,
          onDismiss: @escaping (Int) -> Void,
-         onShortcut: ((Int) -> Void)? = nil,
+         spaceEnterSessionID: Int? = nil,
          panelWidth: CGFloat = 0,
          swipeExcludeBottom: CGFloat = 0,
          swipeExcludeRight: CGFloat = 0,
@@ -60,7 +60,7 @@ struct SinglePhotoView: View {
         self.onDismissBegin = onDismissBegin
         self.onBeforeDismiss = onBeforeDismiss
         self.onDismiss = onDismiss
-        self.onShortcut = onShortcut
+        self.spaceEnterSessionID = spaceEnterSessionID
         self.panelWidth = panelWidth
         self.swipeExcludeBottom = swipeExcludeBottom
         self.swipeExcludeRight = swipeExcludeRight
@@ -126,7 +126,16 @@ struct SinglePhotoView: View {
                 }
             }
         }
-        .background(KeyMonitorView(onKey: handleKey, onShortcut: onShortcut))
+        .background(KeyMonitorView(onKey: handleKey))
+        .onReceive(NotificationCenter.default.publisher(for: .spaceUp)) { note in
+            guard let ev = note.object as? SpaceKeyEvent else { return }
+            guard ev.sessionID != spaceEnterSessionID else { return }
+            dismiss()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .spaceLongPressEnd)) { note in
+            guard note.object is SpaceKeyEvent else { return }
+            dismiss()
+        }
         .overlay(alignment: .topLeading) { inspectorOverlay }
         .background(GeometryReader { bg in
             Color.clear
