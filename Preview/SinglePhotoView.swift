@@ -11,9 +11,9 @@ struct SinglePhotoView: View {
     let sourceFrame: CGRect
     let getGridFrame: (Int) -> CGRect
     let onIndexChange: (Int) -> Void
-    let onDismissBegin: () -> Void     // called at dismiss start so gradient syncs with animation
     // Called with the flat grid index just before the dismiss animation; use to scroll grid into view
     var onBeforeDismiss: ((Int) -> Void)? = nil
+    var onDismissBegin: (() -> Void)? = nil
     let onDismiss: (Int) -> Void
     var spaceEnterSessionID: Int? = nil  // sessionID of the spaceDown that triggered entry; dismiss ignores matching release
     var panelWidth: CGFloat = 0
@@ -29,6 +29,9 @@ struct SinglePhotoView: View {
     @State private var videoPlayers: [Int: AVPlayer] = [:]
     @State private var gifFrames: [Int: GIFContent] = [:]
     @State private var navOffset: CGFloat = 0
+    @State private var dismissDragY: CGFloat = 0   // vertical pull-down during gesture
+    @State private var dismissDragX: CGFloat = 0   // horizontal free-follow during vertical dismiss gesture
+    @State private var scrollPrepared = false       // grid scroll-to-visible already called for current drag
     @State private var isGestureActive = false
     @State private var isNavAnimating = false
     @State private var showInspector = false
@@ -38,13 +41,17 @@ struct SinglePhotoView: View {
 
     // Bound to ContentView's focusedFrame so window layout changes (fullscreen) propagate here
     @Binding var dismissSourceFrame: CGRect
+    // Drives the background overlay opacity in ContentView — 0=hidden, 1=fully visible.
+    // SinglePhotoView owns all transitions: entry, drag, dismiss, cancel.
+    @Binding var backdropOpacity: CGFloat
 
     init(assets: [PhotoAsset], initialIndex: Int, enterTrigger: Int = 0,
          sourceFrame: Binding<CGRect>,
+         backdropOpacity: Binding<CGFloat>,
          getGridFrame: @escaping (Int) -> CGRect,
          onIndexChange: @escaping (Int) -> Void,
-         onDismissBegin: @escaping () -> Void,
          onBeforeDismiss: ((Int) -> Void)? = nil,
+         onDismissBegin: (() -> Void)? = nil,
          onDismiss: @escaping (Int) -> Void,
          spaceEnterSessionID: Int? = nil,
          panelWidth: CGFloat = 0,
@@ -57,8 +64,8 @@ struct SinglePhotoView: View {
         self.sourceFrame = sourceFrame.wrappedValue
         self.getGridFrame = getGridFrame
         self.onIndexChange = onIndexChange
-        self.onDismissBegin = onDismissBegin
         self.onBeforeDismiss = onBeforeDismiss
+        self.onDismissBegin = onDismissBegin
         self.onDismiss = onDismiss
         self.spaceEnterSessionID = spaceEnterSessionID
         self.panelWidth = panelWidth
@@ -67,6 +74,7 @@ struct SinglePhotoView: View {
         self.useThumbnailFit = useThumbnailFit
         _currentIndex = State(initialValue: initialIndex)
         _dismissSourceFrame = sourceFrame
+        _backdropOpacity = backdropOpacity
     }
 
 
@@ -75,11 +83,11 @@ struct SinglePhotoView: View {
             let w = geo.size.width
             let h = geo.size.height
             ZStack {
-                backdrop
-                    .opacity(appeared ? 1 : 0)
-
                 neighborCard(offset: -1, containerWidth: w, containerHeight: h)
-                currentCard(containerWidth: w, containerHeight: h, containerGlobalFrame: containerGlobalFrame)
+                currentCard(containerWidth: w, containerHeight: h,
+                            containerGlobalFrame: containerGlobalFrame,
+                            dismissDragX: dismissDragX,
+                            dismissDragY: dismissDragY)
                 neighborCard(offset: +1, containerWidth: w, containerHeight: h)
             }
             .clipped()
@@ -88,8 +96,11 @@ struct SinglePhotoView: View {
             .overlay(alignment: .topLeading) {
                 SwipeNavigationView(
                     containerWidth: max(0, w - swipeExcludeRight),
+                    containerHeight: h,
                     onDrag: { handleDrag(fraction: $0) },
-                    onSettle: { settleGesture(direction: $0) }
+                    onSettle: { settleGesture(direction: $0) },
+                    onVerticalDrag: { handleVerticalDrag(dx: $0, dy: $1) },
+                    onVerticalSettle: { handleVerticalSettle(velocity: $0) }
                 )
                 .frame(width: max(0, w - swipeExcludeRight),
                        height: max(0, geo.size.height - swipeExcludeBottom))
@@ -166,10 +177,6 @@ struct SinglePhotoView: View {
 
     // MARK: - Body Fragments
 
-    private var backdrop: some View {
-        Color.clear
-    }
-
     @ViewBuilder
     private func neighborCard(offset: Int, containerWidth w: CGFloat, containerHeight h: CGFloat) -> some View {
         let idx = currentIndex + offset
@@ -184,7 +191,9 @@ struct SinglePhotoView: View {
     }
 
     @ViewBuilder
-    private func currentCard(containerWidth w: CGFloat, containerHeight h: CGFloat, containerGlobalFrame gf: CGRect) -> some View {
+    private func currentCard(containerWidth w: CGFloat, containerHeight h: CGFloat,
+                             containerGlobalFrame gf: CGRect,
+                             dismissDragX: CGFloat, dismissDragY: CGFloat) -> some View {
         if assets.indices.contains(currentIndex) {
             let localSourceFrame: CGRect? = {
                 let src = dismissSourceFrame
@@ -200,7 +209,9 @@ struct SinglePhotoView: View {
                 videoPlayer: mediaVisible && !isNavAnimating ? videoPlayers[currentIndex] : nil,
                 gifContent: mediaVisible && !isNavAnimating ? gifFrames[currentIndex] : nil,
                 containerRect: rect,
-                useThumbnailFit: useThumbnailFit
+                useThumbnailFit: useThumbnailFit,
+                dismissDragX: dismissDragX,
+                dismissDragY: dismissDragY
             )
             .offset(x: navOffset * w)
             .id(currentIndex)
@@ -222,11 +233,11 @@ struct SinglePhotoView: View {
     private func enterSequence() async {
         // Reset in case we're interrupting a dismiss animation
         mediaVisible = false
-        withoutAnimation { appeared = false }
+        withoutAnimation { appeared = false; dismissDragY = 0; dismissDragX = 0; scrollPrepared = false }
         loadMedia(for: currentIndex)
         try? await Task.sleep(for: .milliseconds(Anim.enterDelayMs))
         guard !Task.isCancelled else { return }
-        withAnimation(Anim.enter) { appeared = true }
+        withAnimation(Anim.enter) { appeared = true; backdropOpacity = 1 }
         try? await Task.sleep(for: .milliseconds(Anim.mediaReadyDelayMs))
         guard !Task.isCancelled else { return }
         mediaVisible = true
@@ -238,13 +249,13 @@ struct SinglePhotoView: View {
     }
 
     private func runDismissAnimation(index: Int) {
-        onDismissBegin()
         isHoveringVideoArea = false
-        // Scroll grid so target cell is visible before reading its frame and animating to it
-        onBeforeDismiss?(index)
+        onDismissBegin?()
+        if !scrollPrepared { onBeforeDismiss?(index) }
+        scrollPrepared = false
         let target = getGridFrame(index)
         if target != .zero { dismissSourceFrame = target }
-        withAnimation(Anim.dismiss) { appeared = false }
+        withAnimation(Anim.dismiss) { appeared = false; backdropOpacity = 0 }
         DispatchQueue.main.asyncAfter(deadline: .now() + Anim.dismissDelay) {
             onDismiss(index)
         }
@@ -273,6 +284,7 @@ struct SinglePhotoView: View {
     }
 
     private func handleDrag(fraction: CGFloat) {
+        guard appeared else { return }
         isGestureActive = true
         let hasPrev = assets.indices.contains(currentIndex - 1)
         let hasNext = assets.indices.contains(currentIndex + 1)
@@ -282,9 +294,47 @@ struct SinglePhotoView: View {
         withoutAnimation { navOffset = clamped }
     }
 
+    private func handleVerticalDrag(dx: CGFloat, dy: CGFloat) {
+        guard appeared else { return }
+        let clamped = max(dy, 0)
+        // On the first real downward movement, scroll the grid so the target cell is already
+        // in view before dismiss fires. This prevents scrollToVisible from triggering a
+        // scroll event after finger-lift, which would leak through to the grid.
+        if clamped > 0 && !scrollPrepared {
+            scrollPrepared = true
+            onBeforeDismiss?(currentIndex)
+        }
+        withoutAnimation {
+            dismissDragY = clamped
+            // X free-follow only active while pulling down; ignore when gesture hasn't gone down yet
+            dismissDragX = clamped > 0 ? dx : 0
+            let h = max(containerGlobalFrame.height, 1)
+            let progress = clamped / max(h * Anim.dismissDragThreshold, 1)
+            backdropOpacity = max(Anim.dismissDragOpacityFloor, 1 - progress * 0.8)
+        }
+    }
+
+    private func handleVerticalSettle(velocity: CGFloat) {
+        // velocity = lastDeltaY at finger-lift: positive = finger moving down, negative = slowing/reversing.
+        // Dismiss if: any downward drag past the noise floor, OR a fast downward flick at lift.
+        guard appeared else { withoutAnimation { dismissDragY = 0 }; return }
+        let shouldDismiss = dismissDragY > Anim.dismissDragMinPx || velocity > Anim.dismissVelocityThreshold
+        if shouldDismiss {
+            withoutAnimation { navOffset = 0 }
+            dismiss()
+        } else {
+            scrollPrepared = false
+            withAnimation(Anim.gestureCancel) { dismissDragY = 0; dismissDragX = 0; backdropOpacity = 1 }
+        }
+    }
+
     private func settleGesture(direction: Int) {
         isGestureActive = false
         guard appeared else { withoutAnimation { navOffset = 0 }; return }
+
+        // Vertical dismiss takes priority — horizontal settle is a no-op in that case
+        let willDismiss = dismissDragY > Anim.dismissDragMinPx
+        guard !willDismiss else { withoutAnimation { navOffset = 0 }; return }
 
         let newIndex = currentIndex + direction
         guard direction != 0, assets.indices.contains(newIndex) else {
@@ -430,12 +480,20 @@ struct PhotoCardView: View {
     let gifContent: GIFContent?
     var containerRect: CGRect = .zero  // photo fits within this rect; .zero = full geo
     var useThumbnailFit: Bool = false
+    var dismissDragX: CGFloat = 0     // horizontal free-follow during dismiss gesture; 0 for neighbor cards
+    var dismissDragY: CGFloat = 0     // pull-down offset from dismiss gesture; 0 for neighbor cards
 
     var body: some View {
         GeometryReader { geo in
             let area         = containerRect == .zero ? CGRect(origin: .zero, size: geo.size) : containerRect
-            let endRect      = fittedRect(aspect: aspectRatio, in: area)
-            let animRect     = appeared ? endRect : startRect(endRect: endRect, area: area)
+            let baseEndRect  = fittedRect(aspect: aspectRatio, in: area)
+            // Apply pull-down offset and scale to endRect so dismiss springs from current drag position
+            let dragProgress = max(dismissDragY, 0) / max(area.height * Anim.dismissDragThreshold, 1)
+            let dragScale    = max(0.5, 1.0 - dragProgress * 0.12)
+            let endRect      = appeared ? baseEndRect.offsetBy(dx: dismissDragX, dy: dismissDragY)
+                                                     .scaled(by: dragScale, around: CGPoint(x: area.midX, y: area.midY))
+                                        : baseEndRect
+            let animRect     = appeared ? endRect : startRect(endRect: baseEndRect, area: area)
             let cornerRadius: CGFloat = appeared ? 0 : Layout.cardCornerRadius
 
             // Static image / GIF layer — always follows animRect
@@ -606,4 +664,15 @@ struct ImageInspectorHUD: View {
     }
 
     private func fmt(_ v: CGFloat) -> String { String(format: "%.0f", v) }
+}
+
+private extension CGRect {
+    func scaled(by s: CGFloat, around anchor: CGPoint) -> CGRect {
+        CGRect(
+            x: anchor.x + (minX - anchor.x) * s,
+            y: anchor.y + (minY - anchor.y) * s,
+            width: width * s,
+            height: height * s
+        )
+    }
 }

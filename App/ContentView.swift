@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var showSortedView = false
     @State private var sortedSelectedIDs: Set<String> = []
 
+    @State private var showCommitConfirm = false       // confirm before batch-writing sorted photos
     @State private var showQuitConfirm = false        // quit-time alert (has pending deletes)
     @State private var showQuitUncategorized = false  // quit-time alert (no pending deletes)
     @State private var showRefreshConfirm = false     // refresh alert while in sorted view
@@ -22,7 +23,9 @@ struct ContentView: View {
     @State private var focusedID: String?
     @State private var focusedFrame: CGRect = .zero
     @State private var isInSingleMode = false
-    @State private var showingPreview = false      // drives gradient timing, decoupled from isInSingleMode
+    @State private var showingPreview = false      // structural: gates isInSingleMode UI rendering
+    @State private var previewOpacity: CGFloat = 0 // animation: owned by SinglePhotoView via binding
+    @State private var dismissBegun = false        // true from dismiss-begin until SinglePhotoView gone
     @State private var singleModeInitialIndex: Int = 0
     @State private var singleModeCurrentIndex: Int = 0
     // Pending onDismiss work; cancelled if enter interrupts the dismiss animation
@@ -60,11 +63,12 @@ struct ContentView: View {
         _photosStore = State(initialValue: PhotosStore())
     }
 
-    // showingPreview drives gradient timing so they animate in/out with the photo,
-    // not with isInSingleMode (which changes before/after the photo animation).
     private var showOverlays: Bool {
         !showingPreview && !photosStore.assets.isEmpty && !photosStore.isLoading
     }
+
+    // Strip hides while in single mode; starts showing as soon as dismiss begins
+    private var stripHiddenInSingleMode: Bool { showingPreview && !dismissBegun }
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -116,11 +120,11 @@ struct ContentView: View {
             )
             .padding(.trailing, panelTotalWidth)
 
-            // 层 2：单图背景遮罩（全窗口宽，始终存在以保证淡入动画正常触发）
+            // 层 2：单图背景遮罩 — opacity由SinglePhotoView通过backdropOpacity binding驱动，
+            // 进入/向下拖/取消/dismiss的动画时序完全由SinglePhotoView控制
             Color(colorScheme == .dark ? NSColor.black : NSColor.windowBackgroundColor)
                 .ignoresSafeArea()
-                .opacity(showingPreview ? 1 : 0)
-                .animation(Anim.enter, value: showingPreview)
+                .opacity(previewOpacity)
                 .allowsHitTesting(false)
 
             // 层 3：单图预览（宽度限制到面板左边，照片动画在网格侧内运动）
@@ -135,20 +139,17 @@ struct ContentView: View {
                 }
                 .padding(.trailing, panelTotalWidth)
                 .allowsHitTesting(false)
-                .opacity(showingPreview && !multiQueueHint ? 0 : 1)
-                .animation(Anim.enter, value: showingPreview)
+                .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
                 .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
 
                 smallTitleOverlay
                     .padding(.trailing, panelTotalWidth)
-                    .opacity(showingPreview && !multiQueueHint ? 0 : 1)
-                    .animation(Anim.enter, value: showingPreview)
+                    .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
                     .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
 
                 largeTitleOverlay
                     .padding(.trailing, panelTotalWidth)
-                    .opacity(showingPreview && !multiQueueHint ? 0 : 1)
-                    .animation(Anim.enter, value: showingPreview)
+                    .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
                     .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
 
                 VStack(spacing: 0) {
@@ -162,8 +163,7 @@ struct ContentView: View {
                 }
                 .padding(.trailing, panelTotalWidth)
                 .allowsHitTesting(false)
-                .opacity(showingPreview ? 0 : 1)
-                .animation(Anim.enter, value: showingPreview)
+                .opacity(1 - previewOpacity)
             }
 
             // 层 5：底部收藏条（网格侧浮层，不延伸到右侧面板）
@@ -174,7 +174,7 @@ struct ContentView: View {
                     recentNodes: albumsStore.recentNodes,
                     onAssign: assignToAlbum,
                     onReorderFavorites: albumsStore.reorderFavorites,
-                    isInSingleMode: showingPreview,
+                    isInSingleMode: stripHiddenInSingleMode,
                     autoHideInSingleMode: autoHideStrip,
                     forceLightText: bottomLabelIsWhite,
                     pressedIndex: stripPressedIndex
@@ -193,7 +193,7 @@ struct ContentView: View {
                 )
                 .frame(width: rightWidth)
                 .background(.ultraThickMaterial)
-                .animation(Anim.enter, value: showingPreview)
+                .animation(Anim.enter, value: previewOpacity > 0.5)
             }
             .offset(x: sidebarVisible ? 0 : 1 + rightWidth)
             .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
@@ -208,7 +208,7 @@ struct ContentView: View {
                             Image(systemName: "sidebar.right")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(
-                                    showingPreview
+                                    previewOpacity > 0.5
                                         ? Color.primary.opacity(0.35)
                                         : (!sidebarVisible && !topLabelIsWhite
                                             ? Color.accentColor
@@ -221,24 +221,51 @@ struct ContentView: View {
                         .help("显示/隐藏相册面板 (⌘\\)")
                         .padding(.trailing, sidebarVisible ? 1 + rightWidth + 2 : 4)
                         .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
-                        .animation(.easeInOut(duration: Anim.fadeInOut), value: showingPreview)
+                        .animation(.easeInOut(duration: Anim.fadeInOut), value: previewOpacity > 0.5)
                         .animation(.easeInOut(duration: Anim.fadeInOut), value: topLabelIsWhite)
                     }
 
                 if !showingPreview && totalSortedAndDeleteCount > 0 {
-                    HStack {
+                    HStack(alignment: .center, spacing: 4) {
                         Spacer()
+                        Button {
+                            showCommitConfirm = true
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 18, height: 18)
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(Color.white)
+                            }
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("确认分类（将所有已分类照片写入相册）")
                         modeSwitchControl
-                            .padding(.trailing, sidebarVisible ? 1 + rightWidth + 10 : 42)
-                            .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
+                            .padding(.trailing, 0)
                     }
-                    .padding(.top, 0)
+                    .padding(.trailing, sidebarVisible ? 1 + rightWidth + 10 : 42)
+                    .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
                     .transition(.opacity)
+                    .confirmationDialog(
+                        "确认分类",
+                        isPresented: $showCommitConfirm,
+                        titleVisibility: .visible
+                    ) {
+                        Button("确认分类") { commitAll() }
+                            .keyboardShortcut(.defaultAction)
+                        Button("取消", role: .cancel) {}
+                    } message: {
+                        Text("将 \(totalSortedAndDeleteCount) 张照片写入对应相册，此操作不可撤销。")
+                    }
                 }
 
                 Spacer()
             }
-            .animation(.easeInOut(duration: Anim.fadeInOut), value: showingPreview)
+            .animation(.easeInOut(duration: Anim.fadeInOut), value: previewOpacity > 0.5)
             .animation(.easeInOut(duration: Anim.fadeInOut), value: totalSortedAndDeleteCount > 0)
 
             // 层 7：全局反馈层
@@ -476,8 +503,7 @@ struct ContentView: View {
         .padding(.top, titlebarHeight + 10)
         .opacity(largeTitleOpacity)
         // showingPreview / multiQueueHint 触发时带动画淡出，独立于 topGradientOpacity 驱动的渐变逻辑
-        .opacity(showingPreview || multiQueueHint ? 0 : 1)
-        .animation(Anim.enter, value: showingPreview)
+        .opacity(multiQueueHint ? 0 : 1 - previewOpacity)
         .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
         .allowsHitTesting(false)
         .animation(.easeInOut(duration: Anim.fadeInOut), value: showSortedView)
@@ -625,6 +651,7 @@ struct ContentView: View {
             initialIndex: singleModeInitialIndex,
             enterTrigger: singleEnterTrigger,
             sourceFrame: $focusedFrame,
+            backdropOpacity: $previewOpacity,
             getGridFrame: { localIdx in
                 let id = localIdx < singleModeAssets.count ? singleModeAssets[localIdx].id : nil
                 guard let eid = id else {
@@ -648,7 +675,6 @@ struct ContentView: View {
                 return gridLayout.frameFor(index: flatIdx ?? localIdx)
             },
             onIndexChange: { singleModeCurrentIndex = $0 },
-            onDismissBegin: { showingPreview = false },
             onBeforeDismiss: { localIdx in
                 let id = localIdx < singleModeAssets.count ? singleModeAssets[localIdx].id : nil
                 guard let eid = id else { return }
@@ -669,9 +695,12 @@ struct ContentView: View {
                 }
                 if let idx = flatIdx { gridLayout.scrollToVisible?(idx) }
             },
+            onDismissBegin: { dismissBegun = true },
             onDismiss: { finalIndex in
                 let work = DispatchWorkItem {
                     isInSingleMode = false
+                    showingPreview = false
+                    dismissBegun = false
                     let dismissedID = singleModeAssets.indices.contains(finalIndex)
                         ? singleModeAssets[finalIndex].id : nil
                     if let id = dismissedID { focusedID = id }
@@ -695,6 +724,7 @@ struct ContentView: View {
             pendingDismissWork?.cancel()
             pendingDismissWork = nil
             showingPreview = true
+            dismissBegun = false
             singleEnterTrigger += 1
             return
         }
@@ -1073,6 +1103,41 @@ struct ContentView: View {
         PHAsset.fetchAssets(withLocalIdentifiers: assets.map(\.id), options: nil)
             .enumerateObjects { a, _, _ in result.append(a) }
         return result
+    }
+
+    // Batch-write all classified photos to Photos framework (no quit).
+    private func commitAll() {
+        let groups = sortHistory.groupedByAlbum
+        let pending = sortHistory.pendingDeleteAssets
+
+        var total = groups.count + (pending.isEmpty ? 0 : 1)
+        guard total > 0 else { return }
+
+        func done() {
+            total -= 1
+            guard total == 0 else { return }
+            sortHistory.clearAll()
+            showSortedView = false
+            ContentView.postSortedCompletionNotification(history: sortHistory)
+            showTopHint("分类完成")
+        }
+
+        for g in groups {
+            guard let collection = g.albumNode.assetCollection else { done(); continue }
+            let phAssets = fetchPHAssets(for: g.assets)
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetCollectionChangeRequest(for: collection)?.addAssets(phAssets as NSFastEnumeration)
+            }) { _, _ in DispatchQueue.main.async { done() } }
+        }
+
+        if !pending.isEmpty {
+            var phAssets: [PHAsset] = []
+            PHAsset.fetchAssets(withLocalIdentifiers: pending.map(\.id), options: nil)
+                .enumerateObjects { a, _, _ in phAssets.append(a) }
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets(phAssets as NSFastEnumeration)
+            }) { _, _ in DispatchQueue.main.async { done() } }
+        }
     }
 
     // Batch-write all classified photos to Photos framework, then quit.

@@ -99,7 +99,11 @@ struct VideoControlsBar: View {
                     duration = d.seconds
                 }
             }
-            .onDisappear { coordinator.detach(from: player) }
+            .onDisappear {
+                let p = player
+                let c = coordinator
+                DispatchQueue.main.async { c.detach(from: p) }
+            }
     }
 
     // MARK: Bar Layout
@@ -248,9 +252,10 @@ struct VideoControlsBar: View {
         private var token: Any?
 
         func attach(player: AVPlayer, onTick: @escaping (Double, Double, Bool) -> Void) {
-            guard token == nil else { return }
+            detach(from: player)
             let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
-            token = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            token = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak player] time in
+                guard let player else { return }
                 let dur = player.currentItem?.duration
                 let durSec = (dur?.isValid == true && dur?.isNumeric == true) ? dur!.seconds : 1.0
                 onTick(time.seconds, durSec, player.timeControlStatus == .playing)

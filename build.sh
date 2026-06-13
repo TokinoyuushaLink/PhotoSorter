@@ -56,6 +56,7 @@ if [ -f "$ICON_SRC" ]; then
 
     cat > "$CLIP_SCRIPT" << 'SWIFTSCRIPT'
     import AppKit
+    import SwiftUI
     guard CommandLine.arguments.count == 3 else { exit(1) }
     let inputPath  = CommandLine.arguments[1]
     let outputPath = CommandLine.arguments[2]
@@ -72,13 +73,16 @@ if [ -f "$ICON_SRC" ]; then
         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    let padding      = pixelSize * 0.09
-    let contentSize  = pixelSize - (padding * 2)
-    let cornerRadius = contentSize * 0.225
-    let rect = NSRect(x: padding, y: padding, width: contentSize, height: contentSize)
-    let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+    let padding     = pixelSize * 0.10  // 内容区留白：调整此系数（0.09 ≈ 原始值，0.10 ≈ 苹果规范）
+    let contentSize = pixelSize - (padding * 2)
+    let cornerRadius = contentSize * 0.225  // 圆角大小：调整此系数（0.0 = 无圆角，0.5 = 全圆）
+    let rect = CGRect(x: padding, y: padding, width: contentSize, height: contentSize)
+    let cgPath = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                     .path(in: rect).cgPath
+    let path = NSBezierPath(cgPath: cgPath)
     path.addClip()
-    image.draw(in: rect, from: .zero, operation: .copy, fraction: 1.0)
+    image.draw(in: rect,
+               from: .zero, operation: .copy, fraction: 1.0)
     NSGraphicsContext.restoreGraphicsState()
     if let data = rep.representation(using: .png, properties: [:]) {
         try? data.write(to: URL(fileURLWithPath: outputPath))
@@ -129,7 +133,7 @@ cat > "$CONTENTS/Info.plist" << PLIST
 <dict>
   <key>CFBundleName</key>                <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>          <string>com.linkapps.PhotoSorter</string>
-  <key>CFBundleVersion</key>             <string>1.2.0</string>
+  <key>CFBundleVersion</key>             <string>1.3.1</string>
   <key>CFBundleExecutable</key>          <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
   <key>NSPrincipalClass</key>            <string>NSApplication</string>

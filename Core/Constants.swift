@@ -188,10 +188,14 @@ enum Anim {
     static let gestureCancel = Animation.spring(response: 0.30, dampingFraction: 0.80)
     static let videoFadeIn   = Animation.easeIn(duration: 0.15)
 
-    static let enterDelayMs:      UInt64       = 30
-    static let mediaReadyDelayMs: UInt64       = 630   // spring(response:0.42) settles ~650ms
-    static let dismissDelay:      TimeInterval = 0.35
-    static let gestureThreshold:  CGFloat      = 0.05
+    static let enterDelayMs:           UInt64       = 30
+    static let mediaReadyDelayMs:      UInt64       = 630   // spring(response:0.42) settles ~650ms
+    static let dismissDelay:           TimeInterval = 0.35
+    static let gestureThreshold:       CGFloat      = 0.05
+    static let dismissDragThreshold:   CGFloat      = 0.35  // fraction of height at which backdrop fully fades
+    static let dismissDragMinPx:         CGFloat      = 30   // minimum downward drag to register as dismiss intent
+    static let dismissVelocityThreshold: CGFloat     = 4    // per-event deltaY (pts) counted as a fast flick
+    static let dismissDragOpacityFloor:  CGFloat     = 0.3  // backdrop never goes below this during drag (only dismiss anim reaches 0)
 
     // UI feedback
     static let hintDuration:       TimeInterval = 2.5   // top hint auto-dismiss
