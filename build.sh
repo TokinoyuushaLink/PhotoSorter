@@ -133,7 +133,7 @@ cat > "$CONTENTS/Info.plist" << PLIST
 <dict>
   <key>CFBundleName</key>                <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>          <string>com.linkapps.PhotoSorter</string>
-  <key>CFBundleVersion</key>             <string>1.3.1</string>
+  <key>CFBundleVersion</key>             <string>1.3.2</string>
   <key>CFBundleExecutable</key>          <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
   <key>NSPrincipalClass</key>            <string>NSApplication</string>

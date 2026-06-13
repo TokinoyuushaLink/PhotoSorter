@@ -44,6 +44,7 @@ struct ContentView: View {
     @State private var topHintTask: Task<Void, Never>? = nil
     @State private var gridLayout = GridLayout()
     @State private var stripPressedIndex: Int? = nil
+    @State private var stripForceShow: Bool = false
     // sessionID of the spaceDown that triggered the current single-mode entry
     @State private var spaceEnterSessionID: Int? = nil
 
@@ -100,190 +101,18 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            // 层 1：照片网格（padding 右边让出面板空间，PhotoGridView 内部 geo 坐标天然正确）
-            PhotoGridView(
-                store: photosStore,
-                focusedID: $focusedID,
-                focusedFrame: $focusedFrame,
-                gridLayout: gridLayout,
-                onOpenPreview: enterSingleMode,
-                topGradientOpacity: $topGradientOpacity,
-                bottomGradientOpacity: $bottomGradientOpacity,
-                topPadding: ((!photosStore.assets.isEmpty || totalSortedAndDeleteCount > 0) && !photosStore.isLoading) ? topGradientH : 0,
-                bottomPadding: stripH + stripFadeH,
-                useThumbnailFit: thumbnailFit,
-                sections: showSortedView ? sortedSections : nil,
-                externalSelectedIDs: showSortedView ? $sortedSelectedIDs : nil,
-                onSelectAll: showSortedView ? {
-                    sortedSelectedIDs = Set(sortedSections.flatMap { $0.assets.map(\.id) })
-                } : nil
-            )
-            .padding(.trailing, panelTotalWidth)
-
-            // 层 2：单图背景遮罩 — opacity由SinglePhotoView通过backdropOpacity binding驱动，
-            // 进入/向下拖/取消/dismiss的动画时序完全由SinglePhotoView控制
-            Color(colorScheme == .dark ? NSColor.black : NSColor.windowBackgroundColor)
-                .ignoresSafeArea()
-                .opacity(previewOpacity)
-                .allowsHitTesting(false)
-
-            // 层 3：单图预览（宽度限制到面板左边，照片动画在网格侧内运动）
+            gridLayer
+            backdropLayer
             if isInSingleMode { singlePhotoView.transition(.identity) }
-
-
-            // 层 4：渐变 + 标题文字（在 SinglePhotoView 上方，进入单图时淡出）
             if (!photosStore.assets.isEmpty || totalSortedAndDeleteCount > 0) && !photosStore.isLoading {
-                VStack(spacing: 0) {
-                    topGradientOverlay.opacity(multiQueueHint ? 1 : smallTitleOpacity)
-                    Spacer()
-                }
-                .padding(.trailing, panelTotalWidth)
-                .allowsHitTesting(false)
-                .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
-                .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
-
-                smallTitleOverlay
-                    .padding(.trailing, panelTotalWidth)
-                    .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
-                    .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
-
-                largeTitleOverlay
-                    .padding(.trailing, panelTotalWidth)
-                    .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
-                    .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
-
-                VStack(spacing: 0) {
-                    Spacer()
-                    LinearGradient(
-                        colors: [gradientBase.opacity(0), gradientBase.opacity(colorScheme == .dark ? 0.65 : 0.45)],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                    .frame(height: stripFadeH + stripH)
-                    .opacity(bottomGradientOpacity)
-                }
-                .padding(.trailing, panelTotalWidth)
-                .allowsHitTesting(false)
-                .opacity(1 - previewOpacity)
+                overlayGradientLayer
             }
-
-            // 层 5：底部收藏条（网格侧浮层，不延伸到右侧面板）
-            VStack(spacing: 0) {
-                Spacer()
-                AlbumStripCombined(
-                    favoriteNodes: albumsStore.favoriteNodes,
-                    recentNodes: albumsStore.recentNodes,
-                    onAssign: assignToAlbum,
-                    onReorderFavorites: albumsStore.reorderFavorites,
-                    isInSingleMode: stripHiddenInSingleMode,
-                    autoHideInSingleMode: autoHideStrip,
-                    forceLightText: bottomLabelIsWhite,
-                    pressedIndex: stripPressedIndex
-                )
-            }
-            .padding(.trailing, panelTotalWidth)
-
-            // 层 6：右侧面板（右对齐浮动，始终可交互）
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                ResizeDivider(width: $rightWidth, minWidth: Layout.columnWidth + 1, maxWidth: 520, side: .right)
-                ColumnBrowserView(
-                    roots: albumsStore.roots,
-                    albumsStore: albumsStore,
-                    onAssign: assignToAlbum
-                )
-                .frame(width: rightWidth)
-                .background(.ultraThickMaterial)
-                .animation(Anim.enter, value: previewOpacity > 0.5)
-            }
-            .offset(x: sidebarVisible ? 0 : 1 + rightWidth)
-            .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
-
-            // 层 7.5：标题栏区域 + 右侧控件（侧边栏按钮；模式切换在其下方）
-            // MovableTitleBarBackground 垫底保证未命中按钮的点击仍可拖动窗口
-            VStack(spacing: 0) {
-                MovableTitleBarBackground()
-                    .frame(height: Layout.titlebarAreaHeight)
-                    .overlay(alignment: .trailing) {
-                        Button(action: toggleSidebar) {
-                            Image(systemName: "sidebar.right")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(
-                                    previewOpacity > 0.5
-                                        ? Color.primary.opacity(0.35)
-                                        : (!sidebarVisible && !topLabelIsWhite
-                                            ? Color.accentColor
-                                            : (topLabelIsWhite ? Color.white : Color.primary))
-                                )
-                                .frame(width: 36, height: 36)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("显示/隐藏相册面板 (⌘\\)")
-                        .padding(.trailing, sidebarVisible ? 1 + rightWidth + 2 : 4)
-                        .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
-                        .animation(.easeInOut(duration: Anim.fadeInOut), value: previewOpacity > 0.5)
-                        .animation(.easeInOut(duration: Anim.fadeInOut), value: topLabelIsWhite)
-                    }
-
-                if !showingPreview && totalSortedAndDeleteCount > 0 {
-                    HStack(alignment: .center, spacing: 4) {
-                        Spacer()
-                        Button {
-                            showCommitConfirm = true
-                        } label: {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.green)
-                                    .frame(width: 18, height: 18)
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(Color.white)
-                            }
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("确认分类（将所有已分类照片写入相册）")
-                        modeSwitchControl
-                            .padding(.trailing, 0)
-                    }
-                    .padding(.trailing, sidebarVisible ? 1 + rightWidth + 10 : 42)
-                    .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
-                    .transition(.opacity)
-                    .confirmationDialog(
-                        "确认分类",
-                        isPresented: $showCommitConfirm,
-                        titleVisibility: .visible
-                    ) {
-                        Button("确认分类") { commitAll() }
-                            .keyboardShortcut(.defaultAction)
-                        Button("取消", role: .cancel) {}
-                    } message: {
-                        Text("将 \(totalSortedAndDeleteCount) 张照片写入对应相册，此操作不可撤销。")
-                    }
-                }
-
-                Spacer()
-            }
-            .animation(.easeInOut(duration: Anim.fadeInOut), value: previewOpacity > 0.5)
-            .animation(.easeInOut(duration: Anim.fadeInOut), value: totalSortedAndDeleteCount > 0)
-
-            // 层 7：全局反馈层
+            albumStripLayer
+            rightPanelLayer
+            titlebarLayer
             if needsPermission { permissionOverlay }
-
-            GlobalKeyMonitor()
-                .allowsHitTesting(false)
-
-            UndoRedoMonitor(
-                canUndo: sortHistory.canUndo,
-                canRedo: sortHistory.canRedo,
-                onUndo: undoLastAction,
-                onRedo: redoLastAction,
-                onDelete: showSortedView && !isInSingleMode ? returnSelectedToUncategorized : nil,
-                onCmdDelete: moveSelectedToPendingDelete,
-                onToggleSidebar: toggleSidebar
-            )
-            .allowsHitTesting(false)
+            GlobalKeyMonitor().allowsHitTesting(false)
+            undoRedoLayer
         }
         .onAppear {
             photosStore.checkCurrentAuthorization()
@@ -352,14 +181,16 @@ struct ContentView: View {
                 if stripPressedIndex == key { stripPressedIndex = nil }
             }
         }
-        // Number key long-press start → show strip highlight
+        // Number key long-press start → show strip highlight; if strip is auto-hidden, force-show it
         .onReceive(NotificationCenter.default.publisher(for: .keyLongPress)) { note in
             guard let key = (note.object as? NSNumber)?.intValue, key >= 0 else { return }
             stripPressedIndex = key
+            if autoHideStrip { stripForceShow = true }
         }
-        // Number key long-press end → clear highlight (no assign)
+        // Number key long-press end → clear highlight; hide strip again if it was force-shown
         .onReceive(NotificationCenter.default.publisher(for: .keyLongPressEnd)) { note in
             guard let key = (note.object as? NSNumber)?.intValue, key >= 0 else { return }
+            stripForceShow = false
             DispatchQueue.main.asyncAfter(deadline: .now() + Anim.columnClearDelay) {
                 if stripPressedIndex == key { stripPressedIndex = nil }
             }
@@ -430,6 +261,185 @@ struct ContentView: View {
             photosStore.clearSelection()
             focusedID = nil
         }
+    }
+
+    // MARK: - ZStack Layers
+
+    // 层 1：照片网格
+    private var gridLayer: some View {
+        PhotoGridView(
+            store: photosStore,
+            focusedID: $focusedID,
+            focusedFrame: $focusedFrame,
+            gridLayout: gridLayout,
+            onOpenPreview: enterSingleMode,
+            topGradientOpacity: $topGradientOpacity,
+            bottomGradientOpacity: $bottomGradientOpacity,
+            topPadding: ((!photosStore.assets.isEmpty || totalSortedAndDeleteCount > 0) && !photosStore.isLoading) ? topGradientH : 0,
+            bottomPadding: stripH + stripFadeH,
+            useThumbnailFit: thumbnailFit,
+            sections: showSortedView ? sortedSections : nil,
+            externalSelectedIDs: showSortedView ? $sortedSelectedIDs : nil,
+            onSelectAll: showSortedView ? {
+                sortedSelectedIDs = Set(sortedSections.flatMap { $0.assets.map(\.id) })
+            } : nil
+        )
+        .padding(.trailing, panelTotalWidth)
+    }
+
+    // 层 2：单图背景遮罩
+    private var backdropLayer: some View {
+        Color(colorScheme == .dark ? NSColor.black : NSColor.windowBackgroundColor)
+            .ignoresSafeArea()
+            .opacity(previewOpacity)
+            .allowsHitTesting(false)
+    }
+
+    // 层 4：渐变 + 标题文字（有内容时显示）
+    @ViewBuilder private var overlayGradientLayer: some View {
+        VStack(spacing: 0) {
+            topGradientOverlay.opacity(multiQueueHint ? 1 : smallTitleOpacity)
+            Spacer()
+        }
+        .padding(.trailing, panelTotalWidth)
+        .allowsHitTesting(false)
+        .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
+        .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
+
+        smallTitleOverlay
+            .padding(.trailing, panelTotalWidth)
+            .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
+            .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
+
+        largeTitleOverlay
+            .padding(.trailing, panelTotalWidth)
+            .opacity(multiQueueHint ? 1 : 1 - previewOpacity)
+            .animation(.easeInOut(duration: Anim.multiHintFade), value: multiQueueHint)
+
+        VStack(spacing: 0) {
+            Spacer()
+            LinearGradient(
+                colors: [gradientBase.opacity(0), gradientBase.opacity(colorScheme == .dark ? 0.65 : 0.45)],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: stripFadeH + stripH)
+            .opacity(bottomGradientOpacity)
+        }
+        .padding(.trailing, panelTotalWidth)
+        .allowsHitTesting(false)
+        .opacity(1 - previewOpacity)
+    }
+
+    // 层 5：底部收藏条
+    private var albumStripLayer: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            AlbumStripCombined(
+                favoriteNodes: albumsStore.favoriteNodes,
+                recentNodes: albumsStore.recentNodes,
+                onAssign: assignToAlbum,
+                onReorderFavorites: albumsStore.reorderFavorites,
+                isInSingleMode: stripHiddenInSingleMode,
+                autoHideInSingleMode: autoHideStrip,
+                forceLightText: bottomLabelIsWhite,
+                pressedIndex: stripPressedIndex,
+                forceShow: stripForceShow
+            )
+        }
+        .padding(.trailing, panelTotalWidth)
+    }
+
+    // 层 6：右侧面板
+    private var rightPanelLayer: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            ResizeDivider(width: $rightWidth, minWidth: Layout.columnWidth + 1, maxWidth: 520, side: .right)
+            ColumnBrowserView(
+                roots: albumsStore.roots,
+                albumsStore: albumsStore,
+                onAssign: assignToAlbum
+            )
+            .frame(width: rightWidth)
+            .background(.ultraThickMaterial)
+            .animation(Anim.enter, value: previewOpacity > 0.5)
+        }
+        .offset(x: sidebarVisible ? 0 : 1 + rightWidth)
+        .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
+    }
+
+    // 层 7：标题栏区域 + 右侧控件
+    private var titlebarLayer: some View {
+        VStack(spacing: 0) {
+            MovableTitleBarBackground()
+                .frame(height: Layout.titlebarAreaHeight)
+                .overlay(alignment: .trailing) {
+                    Button(action: toggleSidebar) {
+                        Image(systemName: "sidebar.right")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(
+                                previewOpacity > 0.5
+                                    ? Color.primary.opacity(0.35)
+                                    : (!sidebarVisible && !topLabelIsWhite
+                                        ? Color.accentColor
+                                        : (topLabelIsWhite ? Color.white : Color.primary))
+                            )
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("显示/隐藏相册面板 (⌘\\)")
+                    .padding(.trailing, sidebarVisible ? 1 + rightWidth + 2 : 4)
+                    .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
+                    .animation(.easeInOut(duration: Anim.fadeInOut), value: previewOpacity > 0.5)
+                    .animation(.easeInOut(duration: Anim.fadeInOut), value: topLabelIsWhite)
+                }
+
+            if !showingPreview && totalSortedAndDeleteCount > 0 {
+                HStack(alignment: .center, spacing: 4) {
+                    Spacer()
+                    Button { showCommitConfirm = true } label: {
+                        ZStack {
+                            Circle().fill(Color.green).frame(width: 18, height: 18)
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Color.white)
+                        }
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("确认分类（将所有已分类照片写入相册）")
+                    modeSwitchControl.padding(.trailing, 0)
+                }
+                .padding(.trailing, sidebarVisible ? 1 + rightWidth + 10 : 42)
+                .animation(.spring(response: 0.36, dampingFraction: 0.84), value: sidebarVisible)
+                .transition(.opacity)
+                .confirmationDialog("确认分类", isPresented: $showCommitConfirm, titleVisibility: .visible) {
+                    Button("确认分类") { commitAll() }.keyboardShortcut(.defaultAction)
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("将 \(totalSortedAndDeleteCount) 张照片写入对应相册，此操作不可撤销。")
+                }
+            }
+
+            Spacer()
+        }
+        .animation(.easeInOut(duration: Anim.fadeInOut), value: previewOpacity > 0.5)
+        .animation(.easeInOut(duration: Anim.fadeInOut), value: totalSortedAndDeleteCount > 0)
+    }
+
+    // 层 8：Undo/Redo + Delete 监听
+    private var undoRedoLayer: some View {
+        UndoRedoMonitor(
+            canUndo: sortHistory.canUndo,
+            canRedo: sortHistory.canRedo,
+            onUndo: undoLastAction,
+            onRedo: redoLastAction,
+            onDelete: showSortedView && !isInSingleMode ? returnSelectedToUncategorized : nil,
+            onCmdDelete: moveSelectedToPendingDelete,
+            onToggleSidebar: toggleSidebar
+        )
+        .allowsHitTesting(false)
     }
 
     // MARK: - Top gradient overlay (gradient only, no text)

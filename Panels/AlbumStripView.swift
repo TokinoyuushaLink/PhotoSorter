@@ -503,6 +503,8 @@ struct AlbumStripCombined: View {
     var forceLightText: Bool = false
     /// 当前长按高亮的收藏索引（由外部键盘监测驱动）
     var pressedIndex: Int? = nil
+    /// 长按数字键期间强制显示（即使 autoHideInSingleMode 为 true）
+    var forceShow: Bool = false
 
     @State private var isHovered = false
 
@@ -510,7 +512,7 @@ struct AlbumStripCombined: View {
     private let hoverTriggerH  = Layout.stripHoverTriggerHeight
 
     private var shouldHide: Bool {
-        isInSingleMode && autoHideInSingleMode && !isHovered
+        isInSingleMode && autoHideInSingleMode && !isHovered && !forceShow
     }
 
     var body: some View {

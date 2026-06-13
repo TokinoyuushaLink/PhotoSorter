@@ -13,6 +13,8 @@ extension Notification.Name {
     static let confirmDeletePending          = Notification.Name("PhotoSorterConfirmDeletePending")
     static let sortedViewShouldDismiss       = Notification.Name("PhotoSorterSortedViewDismiss")
     static let assetsDidSort                 = Notification.Name("PhotoSorterAssetsDidSort")
+    static let clearFavoritesRequested       = Notification.Name("PhotoSorterClearFavorites")
+    static let clearRecentRequested          = Notification.Name("PhotoSorterClearRecent")
 
     // GlobalKeyMonitor raw events
     // Number keys (object: NSNumber, value = 0–9):

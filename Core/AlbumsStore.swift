@@ -48,9 +48,20 @@ final class AlbumsStore {
 
     private let recentKey   = "ps.recentAlbums"
     private let favoriteKey = "ps.favoriteAlbums"
+    private var observers: [NSObjectProtocol] = []
 
     init() {
         loadPersistedData()
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .clearFavoritesRequested, object: nil, queue: .main
+        ) { [weak self] _ in self?.clearFavorites() })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .clearRecentRequested, object: nil, queue: .main
+        ) { [weak self] _ in self?.clearRecent() })
+    }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     // MARK: Load
@@ -89,6 +100,12 @@ final class AlbumsStore {
         favoriteIDs.contains(node.id)
     }
 
+    func clearFavorites() {
+        favoriteIDs = []
+        UserDefaults.standard.set(favoriteIDs, forKey: favoriteKey)
+        rebuildDerivedLists()
+    }
+
     // to 是 NSCollectionView 给出的 drop 最终插入位置（before 语义，remove 之前的 index 空间）
     func reorderFavorites(from: Int, to: Int) {
         guard favoriteIDs.indices.contains(from) else { return }
@@ -112,6 +129,12 @@ final class AlbumsStore {
         }
         recentAlbumIDs = ids
         UserDefaults.standard.set(ids, forKey: recentKey)
+        rebuildDerivedLists()
+    }
+
+    func clearRecent() {
+        recentAlbumIDs = []
+        UserDefaults.standard.set(recentAlbumIDs, forKey: recentKey)
         rebuildDerivedLists()
     }
 

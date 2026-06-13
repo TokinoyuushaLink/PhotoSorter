@@ -34,6 +34,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             action: #selector(selectPhotoLibrary),
                             keyEquivalent: "")
 
+        // Strip menu
+        let stripItem = NSMenuItem(title: "收藏条", action: nil, keyEquivalent: "")
+        menu.addItem(stripItem)
+        let stripMenu = NSMenu(title: "收藏条")
+        stripItem.submenu = stripMenu
+        stripMenu.addItem(withTitle: "删除全部收藏相册",
+                          action: #selector(clearFavoriteAlbums),
+                          keyEquivalent: "")
+        stripMenu.addItem(withTitle: "删除最近使用历史",
+                          action: #selector(clearRecentAlbums),
+                          keyEquivalent: "")
+
         // View menu
         let viewItem = NSMenuItem(title: "显示", action: nil, keyEquivalent: "")
         menu.addItem(viewItem)
@@ -144,6 +156,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard idx >= 0 && idx < libraries.count else { return }
         UserDefaults.standard.set(libraries[idx].path, forKey: Prefs.photoLibraryPath)
         NotificationCenter.default.post(name: .refreshRequested, object: nil)
+    }
+
+    @objc func clearFavoriteAlbums() {
+        let alert = NSAlert()
+        alert.messageText = "删除全部收藏相册？"
+        alert.informativeText = "收藏条中的所有相册将被移除，此操作不可撤销。"
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        NotificationCenter.default.post(name: .clearFavoritesRequested, object: nil)
+    }
+
+    @objc func clearRecentAlbums() {
+        let alert = NSAlert()
+        alert.messageText = "删除最近使用历史？"
+        alert.informativeText = "最近使用的相册记录将被清空，此操作不可撤销。"
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        NotificationCenter.default.post(name: .clearRecentRequested, object: nil)
     }
 
     @objc func toggleAutoHideStrip(_ sender: NSMenuItem) {
