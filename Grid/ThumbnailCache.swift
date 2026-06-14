@@ -13,10 +13,17 @@ actor ThumbnailCache {
     private var order:   [String]          = []
     private let maxSize  = 400
 
+    enum ThumbSource { case disk, phImageManager }
+    private var sources: [String: ThumbSource] = [:]
+
     // Returns cached image immediately (no suspension) — call from cell configure before
     // launching an async task so already-loaded thumbnails appear without a Task hop.
     func cachedImage(for id: String) -> NSImage? {
         cache[id]
+    }
+
+    func cachedSource(for id: String) -> ThumbSource? {
+        sources[id]
     }
 
     // Full async path: direct disk read, fallback to PHImageManager.
@@ -32,21 +39,25 @@ actor ThumbnailCache {
         pending.insert(id)
 
         let img: NSImage?
+        let source: ThumbSource
         if let direct = directReadImage(phAsset: phAsset) {
             img = direct
+            source = .disk
         } else {
             img = await phImageManagerLoad(phAsset: phAsset)
+            source = .phImageManager
         }
 
         pending.remove(id)
         guard let img else { return nil }
         let normalized = normalizeForSwiftUI(img)
-        store(id: id, image: normalized)
+        store(id: id, image: normalized, source: source)
         return normalized
     }
 
     func invalidate() {
         cache   = [:]
+        sources = [:]
         pending = []
         order   = []
     }
@@ -79,8 +90,9 @@ actor ThumbnailCache {
         }
     }
 
-    func store(id: String, image: NSImage) {
+    func store(id: String, image: NSImage, source: ThumbSource = .phImageManager) {
         cache[id] = image
+        sources[id] = source
         order.append(id)
         evictIfNeeded()
     }
@@ -89,6 +101,7 @@ actor ThumbnailCache {
         while cache.count > maxSize, let oldest = order.first {
             order.removeFirst()
             cache.removeValue(forKey: oldest)
+            sources.removeValue(forKey: oldest)
         }
     }
 }

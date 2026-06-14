@@ -11,8 +11,8 @@ struct PhotoAsset: Identifiable, Equatable {
     let pixelWidth: Int
     let pixelHeight: Int
     let mediaType: PHAssetMediaType
-    var preview: NSImage?     // 图片原始比例，供单图模式显示
-    var isGIF: Bool           // 原始文件为 GIF（需要动画播放）
+    var preview: NSImage?
+    var isGIF: Bool
 
     var aspectRatio: CGFloat {
         pixelHeight > 0 ? CGFloat(pixelWidth) / CGFloat(pixelHeight) : 1
@@ -28,6 +28,8 @@ struct PhotoAsset: Identifiable, Equatable {
 }
 
 // MARK: - PhotosStore
+// 职责：照片列表状态管理、PHAsset 缓存、归类写入、选中状态。
+// 预览图加载由 PreviewLoader 负责（注入依赖）。
 
 @Observable
 final class PhotosStore {
@@ -39,7 +41,7 @@ final class PhotosStore {
 
     private var phAssetCache: [String: PHAsset] = [:]
     private var assetIndexByID: [String: Int] = [:]
-    private let thumbQueue = DispatchQueue(label: "photosorter.thumbs", qos: .userInitiated)
+    private let previewLoader = PreviewLoader()
 
     func phAsset(for id: String) -> PHAsset? { phAssetCache[id] }
 
@@ -113,59 +115,31 @@ final class PhotosStore {
         }
     }
 
-    // MARK: Previews（图片原始比例，供单图模式使用）
+    // MARK: Previews
 
     func loadPreviewIfNeeded(for id: String) {
         guard let idx = assetIndexByID[id], idx < assets.count, assets[idx].preview == nil else { return }
         guard let phAsset = phAssetCache[id] else { return }
-        thumbQueue.async { [weak self] in
-            self?.loadPreviewOne(id: id, phAsset: phAsset)
-        }
-    }
-
-    private func loadPreviewOne(id: String, phAsset: PHAsset) {
-        let uuid = id.components(separatedBy: "/").first ?? id
-        let firstChar = String(uuid.prefix(1)).uppercased()
-        if let base = PhotoLibrary.derivativesBase,
-           let image = NSImage(contentsOfFile: "\(base)/\(firstChar)/\(uuid)_1_105_c.jpeg") {
-            let normalized = normalizeForSwiftUI(image)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, let idx = self.assetIndexByID[id],
-                      idx < self.assets.count, self.assets[idx].id == id else { return }
-                withoutAnimation { self.assets[idx].preview = normalized }
-            }
-            return
-        }
-        let opts = PHImageRequestOptions()
-        opts.deliveryMode = .highQualityFormat
-        opts.isNetworkAccessAllowed = true
-        opts.isSynchronous = false
-        PHImageManager.default().requestImage(
-            for: phAsset, targetSize: Layout.previewSize,
-            contentMode: .aspectFit, options: opts
-        ) { [weak self] image, _ in
-            guard let image, let self else { return }
-            let normalized = normalizeForSwiftUI(image)
-            DispatchQueue.main.async {
-                guard let idx = self.assetIndexByID[id],
-                      idx < self.assets.count, self.assets[idx].id == id else { return }
-                withoutAnimation { self.assets[idx].preview = normalized }
-            }
+        previewLoader.loadIfNeeded(id: id, phAsset: phAsset) { [weak self] image in
+            guard let self,
+                  let idx = self.assetIndexByID[id],
+                  idx < self.assets.count,
+                  self.assets[idx].id == id else { return }
+            withoutAnimation { self.assets[idx].preview = image }
         }
     }
 
     private func loadPreviewsBatched() {
-        let snapshot = assets.map { (id: $0.id, phAsset: phAssetCache[$0.id]) }
-
-        for (i, start) in stride(from: 0, to: snapshot.count, by: Layout.previewBatchSize).enumerated() {
-            let batch = Array(snapshot[start..<min(start + Layout.previewBatchSize, snapshot.count)])
-            thumbQueue.asyncAfter(deadline: .now() + Double(i) * Layout.previewBatchDelay) { [weak self] in
-                guard let self else { return }
-                for item in batch {
-                    guard let phAsset = item.phAsset else { continue }
-                    self.loadPreviewOne(id: item.id, phAsset: phAsset)
-                }
-            }
+        let items = assets.compactMap { a -> (id: String, phAsset: PHAsset)? in
+            guard let ph = phAssetCache[a.id] else { return nil }
+            return (id: a.id, phAsset: ph)
+        }
+        previewLoader.loadBatched(items: items) { [weak self] id, image in
+            guard let self,
+                  let idx = self.assetIndexByID[id],
+                  idx < self.assets.count,
+                  self.assets[idx].id == id else { return }
+            withoutAnimation { self.assets[idx].preview = image }
         }
     }
 

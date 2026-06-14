@@ -631,6 +631,8 @@ struct ImageInspectorHUD: View {
                 let tReps = t.representations
                 row("thumb reps", "\(tReps.count)  " + (tReps.isEmpty ? "(lazy)" :
                     tReps.prefix(1).map { "\(type(of: $0))" }.joined()))
+                let src = ThumbnailCache.shared.cachedSource(for: asset.id)
+                row("thumb.src", src == .disk ? "disk (masters)" : src == .phImageManager ? "PHImageManager" : "unknown")
             } else {
                 row("thumbnail", "nil (not cached)")
             }

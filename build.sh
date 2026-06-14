@@ -107,7 +107,7 @@ echo "[编译] 正在收集源文件..."
 SWIFT_FILES=()
 while IFS= read -r f; do
     SWIFT_FILES+=("$f")
-done < <(find "$SCRIPT_DIR" -name "*.swift" ! -name "clip_icon.swift" | sort)
+done < <(find "$SCRIPT_DIR" -name "*.swift" ! -name "clip_icon.swift" ! -name "Tests_logic.swift" ! -path "*/文档/*" | sort)
 
 echo "[编译] 共 ${#SWIFT_FILES[@]} 个文件，目标 $TARGET"
 swiftc \
@@ -133,7 +133,7 @@ cat > "$CONTENTS/Info.plist" << PLIST
 <dict>
   <key>CFBundleName</key>                <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>          <string>com.linkapps.PhotoSorter</string>
-  <key>CFBundleVersion</key>             <string>1.3.2</string>
+  <key>CFBundleVersion</key>             <string>1.3.5</string>
   <key>CFBundleExecutable</key>          <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
   <key>NSPrincipalClass</key>            <string>NSApplication</string>
@@ -149,7 +149,7 @@ PLIST
 # ---------- 完成 ----------
 
 echo ""
-echo "[完成] $APP"
+echo "[构建成功] $APP"
 echo ""
 echo "按 Enter 打开应用，按 ESC 取消..."
 

@@ -113,6 +113,12 @@ struct SwipeNavigationView: NSViewRepresentable {
 
             switch event.phase {
             case .began:
+                // 检查鼠标是否在有效区域内，避免右侧面板和收藏条误触发
+                guard let view = hostView,
+                      let window = view.window else { return false }
+                let locInWindow = event.locationInWindow
+                let locInView = view.convert(locInWindow, from: nil)
+                guard view.bounds.contains(locInView) else { return false }
                 accumulatedX = 0
                 accumulatedY = 0
                 lastDeltaY = 0

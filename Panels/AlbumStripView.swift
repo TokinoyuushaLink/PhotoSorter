@@ -506,6 +506,7 @@ struct AlbumStripCombined: View {
     /// 长按数字键期间强制显示（即使 autoHideInSingleMode 为 true）
     var forceShow: Bool = false
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered = false
 
     private let rowHeight      = Layout.stripRowHeight
@@ -561,7 +562,7 @@ struct AlbumStripCombined: View {
     private var recentRow: some View {
         HStack(spacing: 0) {
             rowLabel(icon: "clock", title: "最近",
-                     color: forceLightText ? Color.white.opacity(0.6) : Color(.secondaryLabelColor))
+                     color: useLightText ? Color.white.opacity(0.6) : Color(.secondaryLabelColor))
             Divider().padding(.vertical, 8)
 
             if recentNodes.isEmpty {
@@ -603,13 +604,17 @@ struct AlbumStripCombined: View {
 
     // MARK: - Helpers
 
+    private var useLightText: Bool {
+        forceLightText || (isInSingleMode && colorScheme == .dark)
+    }
+
     private func rowLabel(icon: String, title: String, color: Color) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon).font(.system(size: 10)).foregroundStyle(color)
             Text(title).font(.caption.weight(.semibold))
-                .foregroundStyle(forceLightText ? Color.white.opacity(0.85) : Color.secondary)
+                .foregroundStyle(useLightText ? Color.white.opacity(0.85) : Color.secondary)
         }
-        .animation(.easeInOut(duration: Anim.fadeInOut), value: forceLightText)
+        .animation(.easeInOut(duration: Anim.fadeInOut), value: useLightText)
         .frame(width: 60, alignment: .leading)
         .padding(.leading, 10)
     }
@@ -617,8 +622,8 @@ struct AlbumStripCombined: View {
     private func emptyHint(_ text: String) -> some View {
         HStack {
             Text(text).font(.caption2)
-                .foregroundStyle(forceLightText ? AnyShapeStyle(Color.white.opacity(0.4)) : AnyShapeStyle(.tertiary))
-                .animation(.easeInOut(duration: Anim.fadeInOut), value: forceLightText)
+                .foregroundStyle(useLightText ? AnyShapeStyle(Color.white.opacity(0.4)) : AnyShapeStyle(.tertiary))
+                .animation(.easeInOut(duration: Anim.fadeInOut), value: useLightText)
                 .padding(.horizontal, 10)
             Spacer(minLength: 0)
         }

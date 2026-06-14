@@ -29,7 +29,8 @@ struct ColumnBrowserView: View {
                                 }
                             }
                             .padding(.vertical, 4)
-                            .frame(minHeight: colHeight, alignment: .center)
+                            .padding(.top, Layout.titlebarAreaHeight)
+                        .frame(minHeight: colHeight, alignment: .center)
                         }
                         .id(colIdx)
                         .frame(width: Layout.columnWidth)
