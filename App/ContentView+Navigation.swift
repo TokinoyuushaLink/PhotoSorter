@@ -14,6 +14,7 @@ extension ContentView {
             getGridFrame: { [self] localIdx in
                 let id = localIdx < singleModeAssets.count ? singleModeAssets[localIdx].id : nil
                 guard let eid = id else { return gridLayout.frameFor(index: localIdx) }
+                if let frame = gridLayout.frameForID?(eid), frame != .zero { return frame }
                 return gridLayout.frameFor(index: flatIndexOf(id: eid) ?? localIdx)
             },
             onIndexChange: { singleModeCurrentIndex = $0 },
@@ -58,10 +59,13 @@ extension ContentView {
         }
         guard let id = focusedID else { return }
 
-        // 进入前刷新 focusedFrame（由布局计算得出，不依赖滚动状态）
-        if let idx = flatIndexOf(id: id) {
-            let frame = gridLayout.frameFor(index: idx)
-            if frame != .zero { focusedFrame = frame }
+        // 进入前刷新 focusedFrame
+        let frame = gridLayout.frameForID?(id) ?? .zero
+        if frame != .zero {
+            focusedFrame = frame
+        } else if let idx = flatIndexOf(id: id) {
+            let f = gridLayout.frameFor(index: idx)
+            if f != .zero { focusedFrame = f }
         }
 
         if showClassifiedView {

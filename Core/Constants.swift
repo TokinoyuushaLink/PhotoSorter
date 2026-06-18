@@ -94,6 +94,9 @@ func withoutAnimation(_ body: () -> Void) {
     var scrollOffset: CGFloat = 0
     // Set by PhotoCollectionView coordinator once makeNSView runs
     var scrollToVisible: ((Int) -> Void)?
+    /// Returns the global screen frame for the item with the given asset ID.
+    /// Falls back to frameFor(index:) when not set (uncategorized mode).
+    var frameForID: ((String) -> CGRect)?
 
     func frameFor(index: Int) -> CGRect {
         guard cellSize > 0, cols > 0 else { return .zero }

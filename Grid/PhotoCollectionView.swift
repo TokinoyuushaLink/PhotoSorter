@@ -67,6 +67,7 @@ struct PhotoCollectionView: NSViewRepresentable {
         c.observeScroll(sv)
 
         gridLayout.scrollToVisible = { [weak c] index in c?.scrollToVisible(flatIndex: index) }
+        gridLayout.frameForID = { [weak c] id in c?.frameForAssetID(id) ?? .zero }
 
         DispatchQueue.main.async { [weak c] in c?.reportScroll() }
 
@@ -462,6 +463,23 @@ struct PhotoCollectionView: NSViewRepresentable {
             reportScroll()
         }
 
+        func frameForAssetID(_ id: String) -> CGRect {
+            guard let cv, let sv else { return .zero }
+            let secs = currentSections()
+            for (s, sec) in secs.enumerated() {
+                if let item = sec.assets.firstIndex(where: { $0.id == id }) {
+                    let ip = IndexPath(item: item, section: s)
+                    guard let attrs = cv.collectionViewLayout?.layoutAttributesForItem(at: ip) else { return .zero }
+                    let gl = parent.gridLayout
+                    return CGRect(
+                        x: gl.originX + attrs.frame.minX,
+                        y: gl.originY - parent.topPadding + attrs.frame.minY + gl.scrollOffset,
+                        width: attrs.frame.width, height: attrs.frame.height)
+                }
+            }
+            return .zero
+        }
+
         // MARK: Tap Handling
 
         func handleTap(indexPath ip: IndexPath, isCommand: Bool, isShift: Bool) {
@@ -469,8 +487,16 @@ struct PhotoCollectionView: NSViewRepresentable {
 
             let secs = currentSections()
             let flatIndex = (0..<ip.section).reduce(0) { $0 + secs[$1].assets.count } + ip.item
-            parent.focusedID    = asset.id
-            parent.focusedFrame = parent.gridLayout.frameFor(index: flatIndex)
+            parent.focusedID = asset.id
+            if let attrs = cv?.collectionViewLayout?.layoutAttributesForItem(at: ip) {
+                let gl = parent.gridLayout
+                parent.focusedFrame = CGRect(
+                    x: gl.originX + attrs.frame.minX,
+                    y: gl.originY - parent.topPadding + attrs.frame.minY + gl.scrollOffset,
+                    width: attrs.frame.width, height: attrs.frame.height)
+            } else {
+                parent.focusedFrame = parent.gridLayout.frameFor(index: flatIndex)
+            }
 
             if let ext = parent.externalSelectedIDs {
                 // Section mode: selection operates on external binding, range within same section

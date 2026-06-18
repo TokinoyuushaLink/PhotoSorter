@@ -26,18 +26,25 @@ private final class ChipCell: NSCollectionViewItem {
     private let keyLabel = NSTextField(labelWithString: "")
     private let bg = NSVisualEffectView()
     private let highlightLayer = CALayer()
+    private let hoverLayer = CALayer()
+    private var isHovered = false
 
     override func loadView() {
         view = NSView()
         view.wantsLayer = true
 
-        bg.material = .popover
+        bg.material = .menu
         bg.state = .active
         bg.blendingMode = .withinWindow
         bg.wantsLayer = true
         bg.layer?.cornerRadius = 5
         bg.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bg)
+
+        hoverLayer.cornerRadius = 5
+        hoverLayer.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
+        hoverLayer.opacity = 0
+        bg.layer?.addSublayer(hoverLayer)
 
         highlightLayer.cornerRadius = 5
         highlightLayer.backgroundColor = NSColor.clear.cgColor
@@ -75,8 +82,33 @@ private final class ChipCell: NSCollectionViewItem {
         super.viewDidLayout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        highlightLayer.frame = bg.layer?.bounds ?? .zero
+        let bounds = bg.layer?.bounds ?? .zero
+        hoverLayer.frame = bounds
+        highlightLayer.frame = bounds
         CATransaction.commit()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        applyHover()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        applyHover()
+    }
+
+    private func applyHover() {
+        hoverLayer.opacity = (!isSelected && isHovered) ? 1 : 0
     }
 
     func configure(node: AlbumNode, index: Int) {
@@ -102,6 +134,7 @@ private final class ChipCell: NSCollectionViewItem {
         CATransaction.commit()
         label.textColor    = isSelected ? .white : .labelColor
         keyLabel.textColor = isSelected ? NSColor.white.withAlphaComponent(0.75) : .secondaryLabelColor
+        applyHover()
     }
 }
 
@@ -463,8 +496,19 @@ private final class FavoriteCollectionView: NSView,
     @objc private func handleClick(_ recognizer: NSClickGestureRecognizer) {
         guard dragSrcIndex == nil else { return }
         let pt = recognizer.location(in: collectionView)
-        if let indexPath = collectionView.indexPathForItem(at: pt) {
-            onAssign?(displayNodes[indexPath.item])
+        guard let indexPath = collectionView.indexPathForItem(at: pt) else { return }
+        onAssign?(displayNodes[indexPath.item])
+        flashCell(at: indexPath)
+    }
+
+    private func flashCell(at indexPath: IndexPath) {
+        guard let cell = collectionView.item(at: indexPath) as? ChipCell else { return }
+        cell.isSelected = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Anim.columnHighlightDelay + Anim.columnClearDelay) { [weak self] in
+            guard let self else { return }
+            if self.pressedIndex != indexPath.item {
+                cell.isSelected = false
+            }
         }
     }
 }

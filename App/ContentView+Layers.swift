@@ -120,7 +120,7 @@ extension ContentView {
                 .frame(height: Layout.titlebarAreaHeight)
                 .overlay(alignment: .trailing) { sidebarToggleButton }
 
-            if !showingPreview && totalClassifiedAndDeleteCount > 0 {
+            if !(showingPreview && !dismissBegun) && totalClassifiedAndDeleteCount > 0 {
                 HStack(alignment: .center, spacing: 4) {
                     Spacer()
                     commitButton
@@ -141,6 +141,7 @@ extension ContentView {
         }
         .animation(.easeInOut(duration: Anim.fadeInOut), value: previewOpacity > 0.5)
         .animation(.easeInOut(duration: Anim.fadeInOut), value: totalClassifiedAndDeleteCount > 0)
+        .animation(.easeInOut(duration: Anim.fadeInOut), value: showingPreview && !dismissBegun)
     }
 
     // MARK: - 层 8：Undo/Redo + Delete 监听
@@ -296,6 +297,7 @@ extension ContentView {
     var modeSwitchControl: some View {
         HStack(spacing: 0) {
             modeButton(title: "未归类", count: photosStore.assets.count, active: !showClassifiedView) {
+                guard showClassifiedView else { return }
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) { showClassifiedView = false }
                 topGradientOpacity = 0
                 bottomGradientOpacity = 0
@@ -303,6 +305,7 @@ extension ContentView {
                 focusedID = nil
             }
             modeButton(title: "已分类", count: totalClassifiedAndDeleteCount, active: showClassifiedView) {
+                guard !showClassifiedView else { return }
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) { showClassifiedView = true }
                 topGradientOpacity = 0
                 bottomGradientOpacity = 0
