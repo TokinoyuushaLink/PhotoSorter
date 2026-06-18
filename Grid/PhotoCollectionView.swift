@@ -219,7 +219,7 @@ struct PhotoCollectionView: NSViewRepresentable {
         var anchorIndexPath: IndexPath? = nil
         // Committed snapshot used as the data source — kept in sync before batch updates
         var cachedSections: [SectionData] = []
-        private var scrollObs: Any?
+        private var observers: [Any] = []
         // Flat item index of the first item in the anchor row
         private var resizeAnchorFlatItem: Int? = nil
         // When true, the captured offsetY is restored verbatim after resize
@@ -230,7 +230,7 @@ struct PhotoCollectionView: NSViewRepresentable {
         init(_ parent: PhotoCollectionView) { self.parent = parent }
 
         deinit {
-            if let o = scrollObs { NotificationCenter.default.removeObserver(o) }
+            observers.forEach { NotificationCenter.default.removeObserver($0) }
         }
 
         // MARK: Helpers
@@ -274,10 +274,22 @@ struct PhotoCollectionView: NSViewRepresentable {
         // MARK: Scroll / Window
 
         func observeScroll(_ sv: NSScrollView) {
-            scrollObs = NotificationCenter.default.addObserver(
+            let scrollObs = NotificationCenter.default.addObserver(
                 forName: NSScrollView.didLiveScrollNotification,
                 object: sv, queue: .main
             ) { [weak self] _ in self?.reportScroll() }
+            // Full-screen transitions change the NSScrollView viewport without triggering
+            // didLiveScrollNotification, so scrollOffset would be stale on re-entry into
+            // single-photo mode. Re-report after the transition completes.
+            let enterObs = NotificationCenter.default.addObserver(
+                forName: NSWindow.didEnterFullScreenNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in self?.reportScroll() }
+            let exitObs = NotificationCenter.default.addObserver(
+                forName: NSWindow.didExitFullScreenNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in self?.reportScroll() }
+            observers = [scrollObs, enterObs, exitObs]
         }
 
         // Called once at the start of a resize; ignored if anchor already locked.

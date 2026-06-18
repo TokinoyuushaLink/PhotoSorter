@@ -1,40 +1,42 @@
 import Photos
 import AppKit
 
+// NSImage is safe to pass across actor boundaries in this codebase: all reads and writes
+// happen on the main thread or within ThumbnailCache's serialized actor context.
+extension NSImage: @unchecked @retroactive Sendable {}
+
 // Scroll-driven thumbnail loader. Cells request images directly via `thumbnail(for:phAsset:)`;
 // no batch timer, no store mutation, no SwiftUI re-render signal needed.
 actor ThumbnailCache {
 
     static let shared = ThumbnailCache()
 
-    private var cache:   [String: NSImage] = [:]
-    private var pending: Set<String>       = []
-    // FIFO eviction order
-    private var order:   [String]          = []
-    private let maxSize  = 400
-
     enum ThumbSource { case disk, phImageManager }
-    private var sources: [String: ThumbSource] = [:]
 
-    // Returns cached image immediately (no suspension) — call from cell configure before
-    // launching an async task so already-loaded thumbnails appear without a Task hop.
-    func cachedImage(for id: String) -> NSImage? {
-        cache[id]
+    // Separate lock-protected store so cachedImage can be called synchronously from any
+    // context (SwiftUI body, cell configure) without an actor hop or async/await.
+    private let store = SyncCache()
+
+    private var pending: Set<String> = []
+
+    // Returns cached image immediately — no actor hop, safe to call from SwiftUI body.
+    nonisolated func cachedImage(for id: String) -> NSImage? {
+        store.get(id)
     }
 
-    func cachedSource(for id: String) -> ThumbSource? {
-        sources[id]
+    nonisolated func cachedSource(for id: String) -> ThumbSource? {
+        store.getSource(id)
     }
 
     // Full async path: direct disk read, fallback to PHImageManager.
     func thumbnail(for id: String, phAsset: PHAsset) async -> NSImage? {
-        if let img = cache[id] { return img }
+        if let img = store.get(id) { return img }
         if pending.contains(id) {
             for _ in 0..<20 {
                 await Task.yield()
-                if let img = cache[id] { return img }
+                if let img = store.get(id) { return img }
             }
-            return cache[id]
+            return store.get(id)
         }
         pending.insert(id)
 
@@ -51,15 +53,17 @@ actor ThumbnailCache {
         pending.remove(id)
         guard let img else { return nil }
         let normalized = normalizeForSwiftUI(img)
-        store(id: id, image: normalized, source: source)
+        store.set(id, image: normalized, source: source)
         return normalized
     }
 
     func invalidate() {
-        cache   = [:]
-        sources = [:]
+        store.removeAll()
         pending = []
-        order   = []
+    }
+
+    func storeImage(id: String, image: NSImage, source: ThumbSource = .phImageManager) {
+        store.set(id, image: image, source: source)
     }
 
     // MARK: - Private
@@ -89,19 +93,38 @@ actor ThumbnailCache {
             ) { image, _ in cont.resume(returning: image) }
         }
     }
+}
 
-    func store(id: String, image: NSImage, source: ThumbSource = .phImageManager) {
-        cache[id] = image
-        sources[id] = source
-        order.append(id)
-        evictIfNeeded()
+// Lock-protected dictionary so cachedImage/cachedSource can be called from nonisolated context.
+private final class SyncCache: @unchecked Sendable {
+    private var cache: [String: NSImage] = [:]
+    private var sources: [String: ThumbnailCache.ThumbSource] = [:]
+    private var order: [String] = []
+    private let lock = NSLock()
+    private let maxSize = 400
+
+    func get(_ id: String) -> NSImage? {
+        lock.withLock { cache[id] }
     }
 
-    private func evictIfNeeded() {
-        while cache.count > maxSize, let oldest = order.first {
-            order.removeFirst()
-            cache.removeValue(forKey: oldest)
-            sources.removeValue(forKey: oldest)
+    func getSource(_ id: String) -> ThumbnailCache.ThumbSource? {
+        lock.withLock { sources[id] }
+    }
+
+    func set(_ id: String, image: NSImage, source: ThumbnailCache.ThumbSource = .phImageManager) {
+        lock.withLock {
+            cache[id] = image
+            sources[id] = source
+            order.append(id)
+            while cache.count > maxSize, let oldest = order.first {
+                order.removeFirst()
+                cache.removeValue(forKey: oldest)
+                sources.removeValue(forKey: oldest)
+            }
         }
+    }
+
+    func removeAll() {
+        lock.withLock { cache = [:]; sources = [:]; order = [] }
     }
 }

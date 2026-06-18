@@ -19,10 +19,8 @@ CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 BIN="$MACOS/$APP_NAME"
-ICON_SRC="$SCRIPT_DIR/icon.png"
+ICONSET_SRC="$SCRIPT_DIR/icon.iconset"
 ICON_DST="$RESOURCES/AppIcon.icns"
-CLIP_SCRIPT="$SCRIPT_DIR/clip_icon.swift"
-TMP_ICONSET="$SCRIPT_DIR/Generated_AppIcon.iconset"
 
 # ---------- 编译目标 ----------
 
@@ -49,57 +47,13 @@ fi
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES"
 
-# 3. 图标生成（icon.png → AppIcon.icns）
-if [ -f "$ICON_SRC" ]; then
-    echo "[图标] 正在生成 macOS 图标..."
-    mkdir -p "$TMP_ICONSET"
-
-    cat > "$CLIP_SCRIPT" << 'SWIFTSCRIPT'
-    import AppKit
-    import SwiftUI
-    guard CommandLine.arguments.count == 3 else { exit(1) }
-    let inputPath  = CommandLine.arguments[1]
-    let outputPath = CommandLine.arguments[2]
-    guard let sizeStr = outputPath.components(separatedBy: "icon_").last?
-                           .components(separatedBy: "x").first,
-          let size  = Double(sizeStr),
-          let image = NSImage(contentsOfFile: inputPath) else { exit(1) }
-    let isRetina  = outputPath.contains("@2x")
-    let pixelSize = isRetina ? size * 2 : size
-    let rep = NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: Int(pixelSize), pixelsHigh: Int(pixelSize),
-        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    let padding     = pixelSize * 0.10  // 内容区留白：调整此系数（0.09 ≈ 原始值，0.10 ≈ 苹果规范）
-    let contentSize = pixelSize - (padding * 2)
-    let cornerRadius = contentSize * 0.225  // 圆角大小：调整此系数（0.0 = 无圆角，0.5 = 全圆）
-    let rect = CGRect(x: padding, y: padding, width: contentSize, height: contentSize)
-    let cgPath = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                     .path(in: rect).cgPath
-    let path = NSBezierPath(cgPath: cgPath)
-    path.addClip()
-    image.draw(in: rect,
-               from: .zero, operation: .copy, fraction: 1.0)
-    NSGraphicsContext.restoreGraphicsState()
-    if let data = rep.representation(using: .png, properties: [:]) {
-        try? data.write(to: URL(fileURLWithPath: outputPath))
-    }
-SWIFTSCRIPT
-
-    for sz in 16 32 128 256 512; do
-        swift "$CLIP_SCRIPT" "$ICON_SRC" "$TMP_ICONSET/icon_${sz}x${sz}.png"
-        swift "$CLIP_SCRIPT" "$ICON_SRC" "$TMP_ICONSET/icon_${sz}x${sz}@2x.png"
-    done
-
-    rm -f "$CLIP_SCRIPT"
-    iconutil -c icns "$TMP_ICONSET" -o "$ICON_DST"
-    rm -rf "$TMP_ICONSET"
+# 3. 图标生成
+if [ -d "$ICONSET_SRC" ]; then
+    echo "[图标] 使用 icon.iconset 生成 AppIcon.icns..."
+    iconutil -c icns "$ICONSET_SRC" -o "$ICON_DST"
     echo "[图标] 完成"
 else
-    echo "[警告] 未找到 icon.png，将使用系统空白图标"
+    echo "[警告] 未找到 icon.iconset，将使用系统空白图标"
 fi
 
 # 4. 收集源文件并编译
@@ -133,7 +87,7 @@ cat > "$CONTENTS/Info.plist" << PLIST
 <dict>
   <key>CFBundleName</key>                <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>          <string>com.linkapps.PhotoSorter</string>
-  <key>CFBundleVersion</key>             <string>1.3.5</string>
+  <key>CFBundleVersion</key>             <string>1.3.6</string>
   <key>CFBundleExecutable</key>          <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
   <key>NSPrincipalClass</key>            <string>NSApplication</string>
