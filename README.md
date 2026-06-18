@@ -26,6 +26,9 @@ https://github.com/user-attachments/assets/b20d0b70-ac0b-4587-a595-cb40a1492b27
 - 触控板左右滑动切换图片，下拉退出动画。
 
 ## 编译
+首先，你需要先到 https://github.com/TokinoyuushaLink/G2-Icon-Clipper 找到iconClipper，根据交互指示，裁剪图标，得到iconset。
+将得到的iconset放到根目录下，这样打包后才有图标。
+然后：
 ```
 chmod +x build.sh
 ./build.sh
